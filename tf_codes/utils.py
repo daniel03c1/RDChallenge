@@ -63,7 +63,7 @@ def freq_mask(spec, max_mask_size=6, mask_num=2):
     return tf.cast(spec, dtype=tf.float32)
 
 
-def time_mask(spec, max_mask_size=21, mask_num=2):
+def time_mask(spec, max_mask_size=15, mask_num=2):
     freq, time, _ = spec.shape
     mask = tf.ones(shape=(1, time, 1), dtype=tf.float32)
 
@@ -100,6 +100,6 @@ def make_dataset(x, y, n_proc, batch_per_node, train=False, **kwargs):
     dataset = tf.data.Dataset.from_tensor_slices((x, y)).cache()
     if train:
         dataset = dataset.map(augment(**kwargs), num_parallel_calls=AUTOTUNE)
-        dataset = dataset.repeat().shuffle(buffer_size=5000)
+        dataset = dataset.repeat().shuffle(buffer_size=6000)
     return dataset.batch(batch_per_node, drop_remainder=True).prefetch(AUTOTUNE)
 

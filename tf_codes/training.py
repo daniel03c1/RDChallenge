@@ -47,23 +47,23 @@ if __name__ == "__main__":
 
     """ MODEL """
     with strategy.scope():
-        if config.pretrain is None:
+        if len(config.pretrain) == 0:
             model = dense_net_based_model(
                 input_shape=(257, None, 4),
                 n_classes=N_CLASSES,
-                n_layer_per_block=[6, 6, 4],
-                growth_rate=14,
+                n_layer_per_block=[4, 6, 10, 6],
+                growth_rate=12,
                 activation='softmax',
                 se=config.se)
         else:
             model = tf.keras.models.load_model(config.pretrain, compile=False)
 
         if config.pretrain:
-            init_lr = 5e-4
+            init_lr = 5e-3
         else:
-            init_lr = 1e-3
+            init_lr = 1e-2
         opt = Adam(CosineDecayRestarts(init_lr, 10, m_mul=0.9, alpha=1e-3),
-                   clipnorm=0.01)
+                   clipnorm=0.1)
 
         def loss_fn(label_smoothing):
             def _loss(y_true, y_pred):
@@ -79,8 +79,8 @@ if __name__ == "__main__":
     # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
     PATH = '/datasets/ai_challenge/icassp/'
 
-    x = np.load(os.path.join(PATH, 'train_x.npy'))[:3500]
-    y = np.load(os.path.join(PATH, 'train_y.npy'))[:3500]
+    x = np.load(os.path.join(PATH, 'train_x.npy'))[:3000]
+    y = np.load(os.path.join(PATH, 'train_y.npy'))[:3000]
 
     if config.task != 'doa':
         noise_x = np.load(os.path.join(PATH, 'noise_only_x.npy'))[:66]
@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
     with Pool() as p:
         x = p.map(np.load, 
-                  [PATH+'gen_spec_{}.npy'.format(i) for i in range(3, 8)])
+                  [PATH+'gen_spec_{}.npy'.format(i) for i in range(4, 8)])
     x = np.concatenate(x, axis=0)
     y = np.load(PATH+'label.npy')[:x.shape[0]]
 
