@@ -26,10 +26,13 @@ def class_to_azimuth(classes):
     return azimuth
 
 
-def normalize_spec(x, log=True, chan=(0, 1)):
+def normalize_spec(x, log=True, minmax=False, chan=(0, 1)):
+    x = x.copy()
     if log:
-        x = x.copy()
         x[:, :, :, chan] = np.log(x[:, :, :, chan] + 1e-8)
+    if minmax:
+        x -= np.min(x, axis=(1, 2), keepdims=True)
+        x /= np.max(x, axis=(1, 2), keepdims=True) + 1e-8
     return x
 
 
@@ -44,7 +47,7 @@ def augment(mask=True, equalizer=True):
     return _aug
 
 
-def freq_mask(spec, max_mask_size=8, mask_num=2):
+def freq_mask(spec, max_mask_size=6, mask_num=2):
     freq, time, _ = spec.shape
     mask = tf.ones(shape=(freq, 1, 1), dtype=tf.float32)
 
@@ -60,7 +63,7 @@ def freq_mask(spec, max_mask_size=8, mask_num=2):
     return tf.cast(spec, dtype=tf.float32)
 
 
-def time_mask(spec, max_mask_size=32, mask_num=2):
+def time_mask(spec, max_mask_size=21, mask_num=2):
     freq, time, _ = spec.shape
     mask = tf.ones(shape=(1, time, 1), dtype=tf.float32)
 
