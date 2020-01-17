@@ -78,23 +78,35 @@ def dense_net_conv2d(*args, **kwargs):
     return _dense_net_conv2d
 
 
-def dense_block(n_layer, growth_rate, se=False, *args, **kwargs):
+def dense_block(n_layer, growth_rate, se=False, dilate=True, *args, **kwargs):
     def _dense_block(tensor):
         x = tensor
         if se:
             x = squeeze_excitation(reduction=2, axis=3, *args, **kwargs)(x)
             x = squeeze_excitation(reduction=2, axis=1, *args, **kwargs)(x)
 
-        for _ in range(n_layer):
-            y = Dropout(0.25)(x)
+        for i in range(n_layer):
+            y = Dropout(0.15)(x)
             y = dense_net_conv2d(filters=growth_rate,
                                  kernel_size=[1, 1],
                                  padding='same',
                                  *args, **kwargs)(y)
+            b, h, w, c = y.shape
+            if dilate:
+                # dilation_rate = (n_layer // 2 + 1,
+                #                  n_layer // 2 + 1)
+                dilation_rate = (i % (n_layer//2) + 1,
+                                 i % (n_layer//2) + 1)
+            else:
+                dilation_rate = (1, 1)
+
             y = dense_net_conv2d(filters=growth_rate,
                                  kernel_size=[3, 3],
                                  padding='same',
+                                 dilation_rate=dilation_rate,
                                  *args, **kwargs)(y)
+            # y.set_shape(shape)
+            y = K.reshape(y, (-1, h, w, c))
             x = Concatenate(axis=-1)([x, y])
 
         return x

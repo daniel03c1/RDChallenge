@@ -55,6 +55,17 @@ def visualize_loss(model_names, titles=None):
 
     plt.legend()
     plt.show()
+
+
+def visualize_logs(default_path=None, category='val_accuracy'):
+    files = [f for f in os.listdir(default_path) if f.endswith('.log')]
+
+    for f in files:
+        d = pd.read_csv(f)
+        plt.plot(d[category], label=f)
+    plt.legend()
+    plt.show()
+
 """
 if __name__ == "__main__":
     PATH = '/media/volume1/ai_challenge/data2019/'

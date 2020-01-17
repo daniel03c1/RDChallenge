@@ -36,13 +36,15 @@ def normalize_spec(x, log=True, minmax=False, chan=(0, 1)):
     return x
 
 
-def augment(mask=True, equalizer=True):
+def augment(mask=True, equalizer=True, roll=False):
     def _aug(x, y):
         if mask:
             x = freq_mask(x)
             x = time_mask(x)
         if equalizer:
             x = random_equalizer(x)
+        if roll:
+            x = random_roll(x)
         return x, y
     return _aug
 
@@ -94,6 +96,13 @@ def random_equalizer(spec):
                            tf.ones(shape=(freq, 1, chan//2))),
                            2)
     return spec * equalizer
+
+
+def random_roll(spec):
+    freq, time, chan = spec.shape
+
+    shift = tf.random.uniform([], maxval=time, dtype=tf.int32)
+    return tf.roll(spec, shift=shift, axis=1)
 
 
 def make_dataset(x, y, n_proc, batch_per_node, train=False, **kwargs):

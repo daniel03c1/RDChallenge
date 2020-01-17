@@ -6,7 +6,7 @@ from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
 from multiprocessing import Pool
-from tensorflow.keras.experimental import CosineDecayRestarts
+from tensorflow.keras.experimental import CosineDecay, CosineDecayRestarts
 import keras
 
 from models import dense_net_based_model
@@ -22,6 +22,7 @@ args.add_argument('--cls_weights', type=bool, default=False)
 args.add_argument('--augment', type=bool, default=True)
 args.add_argument('--mask', type=bool, default=True)
 args.add_argument('--equalizer', type=bool, default=True)
+args.add_argument('--roll', type=bool, default=False)
 args.add_argument('--se', type=bool, default=False)
 args.add_argument('--task', type=str, required=True, 
                   choices=('vad', 'doa', 'both'))
@@ -35,7 +36,7 @@ if __name__ == "__main__":
 
     """ HYPER_PARAMETERS """
     BATCH_SIZE = 64 # per each GPU
-    TOTAL_EPOCH = 250
+    TOTAL_EPOCH = 500
     VAL_SPLIT = 0.2
 
     if config.task == 'vad':
@@ -49,7 +50,7 @@ if __name__ == "__main__":
     with strategy.scope():
         if len(config.pretrain) == 0:
             model = dense_net_based_model(
-                input_shape=(257, None, 4),
+                input_shape=(257, 382, 4),
                 n_classes=N_CLASSES,
                 n_layer_per_block=[4, 6, 10, 6],
                 growth_rate=12,
@@ -62,7 +63,10 @@ if __name__ == "__main__":
             init_lr = 5e-3
         else:
             init_lr = 1e-2
-        opt = Adam(CosineDecayRestarts(init_lr, 10, m_mul=0.9, alpha=1e-3),
+        # opt = Adam(CosineDecayRestarts(init_lr, 10, m_mul=0.9, alpha=1e-3),
+        #            clipnorm=0.1)
+        # opt = Adam(CosineDecay(init_lr, 200, alpha=1e-3), clipnorm=0.1)
+        opt = Adam(CosineDecayRestarts(init_lr, 2, m_mul=0.5, alpha=0.1),
                    clipnorm=0.1)
 
         def loss_fn(label_smoothing):
@@ -79,8 +83,8 @@ if __name__ == "__main__":
     # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
     PATH = '/datasets/ai_challenge/icassp/'
 
-    x = np.load(os.path.join(PATH, 'train_x.npy'))[:3000]
-    y = np.load(os.path.join(PATH, 'train_y.npy'))[:3000]
+    x = np.load(os.path.join(PATH, 'train_x.npy'))
+    y = np.load(os.path.join(PATH, 'train_y.npy'))
 
     if config.task != 'doa':
         noise_x = np.load(os.path.join(PATH, 'noise_only_x.npy'))[:66]
@@ -93,7 +97,7 @@ if __name__ == "__main__":
 
     with Pool() as p:
         x = p.map(np.load, 
-                  [PATH+'gen_spec_{}.npy'.format(i) for i in range(4, 8)])
+                  [PATH+'gen_spec_{}.npy'.format(i) for i in range(2, 8)])
     x = np.concatenate(x, axis=0)
     y = np.load(PATH+'label.npy')[:x.shape[0]]
 
@@ -125,7 +129,8 @@ if __name__ == "__main__":
                                      batch_per_node=BATCH_SIZE,
                                      train=config.augment,
                                      mask=config.mask,
-                                     equalizer=config.equalizer)
+                                     equalizer=config.equalizer,
+                                     roll=config.roll)
         val_dataset = make_dataset(x, y, 
                                    n_proc=strategy.num_replicas_in_sync,
                                    batch_per_node=BATCH_SIZE,
