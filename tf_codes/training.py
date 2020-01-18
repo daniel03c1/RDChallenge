@@ -25,7 +25,7 @@ args.add_argument('--equalizer', type=bool, default=True)
 args.add_argument('--roll', type=bool, default=False)
 args.add_argument('--se', type=bool, default=False)
 args.add_argument('--task', type=str, required=True, 
-                  choices=('vad', 'doa', 'both'))
+                  choices=('vad', 'both'))
 
 
 if __name__ == "__main__":
@@ -37,12 +37,10 @@ if __name__ == "__main__":
     """ HYPER_PARAMETERS """
     BATCH_SIZE = 64 # per each GPU
     TOTAL_EPOCH = 500
-    VAL_SPLIT = 0.2
+    VAL_SPLIT = 0.20
 
     if config.task == 'vad':
         N_CLASSES = 2
-    elif config.task == 'doa':
-        N_CLASSES = 10
     else:
         N_CLASSES = 11
 
@@ -60,12 +58,9 @@ if __name__ == "__main__":
             model = tf.keras.models.load_model(config.pretrain, compile=False)
 
         if config.pretrain:
-            init_lr = 5e-3
+            init_lr = 2e-3
         else:
             init_lr = 1e-2
-        # opt = Adam(CosineDecayRestarts(init_lr, 10, m_mul=0.9, alpha=1e-3),
-        #            clipnorm=0.1)
-        # opt = Adam(CosineDecay(init_lr, 200, alpha=1e-3), clipnorm=0.1)
         opt = Adam(CosineDecayRestarts(init_lr, 2, m_mul=0.5, alpha=0.1),
                    clipnorm=0.1)
 
@@ -82,24 +77,20 @@ if __name__ == "__main__":
     """ DATA """
     # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
     PATH = '/datasets/ai_challenge/icassp/'
+    ORG_CNT = 5000
+    GEN_CNT = 0 # 2048
 
-    x = np.load(os.path.join(PATH, 'train_x.npy'))
-    y = np.load(os.path.join(PATH, 'train_y.npy'))
+    x = np.load(os.path.join(PATH, 'train_x.npy'))[:ORG_CNT]
+    y = np.load(os.path.join(PATH, 'train_y.npy'))[:ORG_CNT]
 
-    if config.task != 'doa':
-        noise_x = np.load(os.path.join(PATH, 'noise_only_x.npy'))[:66]
-        x = np.concatenate([x, noise_x, noise_x[:, :, :, (1, 0, 3, 2)]], axis=0)
-        noise_y = np.load(os.path.join(PATH, 'noise_only_y.npy'))[:66]
-        y = np.concatenate([y, noise_y, noise_y], axis=0)
+    noise_x = np.load(os.path.join(PATH, 'noise_only_x.npy'))[:66]
+    x = np.concatenate([x, noise_x, noise_x[:, :, :, (1, 0, 3, 2)]], axis=0)
+    noise_y = np.load(os.path.join(PATH, 'noise_only_y.npy'))[:66]
+    y = np.concatenate([y, noise_y, noise_y], axis=0)
     _x, _y = x, y
 
-    PATH = '/datasets/ai_challenge/'
-
-    with Pool() as p:
-        x = p.map(np.load, 
-                  [PATH+'gen_spec_{}.npy'.format(i) for i in range(2, 8)])
-    x = np.concatenate(x, axis=0)
-    y = np.load(PATH+'label.npy')[:x.shape[0]]
+    x = np.load(PATH+'gen_x.npy')[GEN_CNT:]
+    y = np.load(PATH+'gen_y.npy')[GEN_CNT:]
 
     x = np.concatenate([_x, x], axis=0)
     y = np.concatenate([_y, y], axis=0)
@@ -131,14 +122,14 @@ if __name__ == "__main__":
                                      mask=config.mask,
                                      equalizer=config.equalizer,
                                      roll=config.roll)
-        val_dataset = make_dataset(x, y, 
+        val_dataset = make_dataset(val_x, val_y, 
                                    n_proc=strategy.num_replicas_in_sync,
                                    batch_per_node=BATCH_SIZE,
                                    train=False)
 
         callbacks = [
             tf.keras.callbacks.EarlyStopping(monitor='val_loss',
-                                             patience=25),
+                                             patience=40),
             tf.keras.callbacks.CSVLogger(config.model_name + '.log',
                                          append=True),
             tf.keras.callbacks.ModelCheckpoint(config.model_name+'.h5',

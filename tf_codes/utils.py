@@ -62,10 +62,12 @@ def freq_mask(spec, max_mask_size=6, mask_num=2):
                            tf.ones(shape=(freq-size-offset, 1, 1))),
                            0)
     spec = spec * mask
+    pad = tf.random.uniform([], dtype=tf.float32) * (1 - mask)
+    spec += pad
     return tf.cast(spec, dtype=tf.float32)
 
 
-def time_mask(spec, max_mask_size=15, mask_num=2):
+def time_mask(spec, max_mask_size=24, mask_num=2):
     freq, time, _ = spec.shape
     mask = tf.ones(shape=(1, time, 1), dtype=tf.float32)
 
@@ -78,6 +80,8 @@ def time_mask(spec, max_mask_size=15, mask_num=2):
                            tf.ones(shape=(1, time-size-offset, 1))),
                            1)
     spec = spec * mask
+    pad = tf.random.uniform([], dtype=tf.float32) * (1 - mask)
+    spec += pad
     return tf.cast(spec, dtype=tf.float32)
 
 
