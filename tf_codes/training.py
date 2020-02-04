@@ -16,13 +16,12 @@ from utils import *
 args = argparse.ArgumentParser()
 args.add_argument('--model_name', type=str, default='model')
 args.add_argument('--pretrain', type=str, default='')
-args.add_argument('--norm_log', type=bool, default=True)
-args.add_argument('--minmax_log', type=bool, default=True)
+args.add_argument('--norm', type=bool, default=False)
 args.add_argument('--cls_weights', type=bool, default=False)
 args.add_argument('--augment', type=bool, default=True)
 args.add_argument('--mask', type=bool, default=True)
 args.add_argument('--equalizer', type=bool, default=True)
-args.add_argument('--roll', type=bool, default=False)
+args.add_argument('--roll', type=bool, default=True)
 args.add_argument('--se', type=bool, default=False)
 args.add_argument('--task', type=str, required=True, 
                   choices=('vad', 'both'))
@@ -36,8 +35,8 @@ if __name__ == "__main__":
 
     """ HYPER_PARAMETERS """
     BATCH_SIZE = 64 # per each GPU
-    TOTAL_EPOCH = 500
-    VAL_SPLIT = 0.20
+    TOTAL_EPOCH = 750
+    VAL_SPLIT = 0.15
 
     if config.task == 'vad':
         N_CLASSES = 2
@@ -48,38 +47,45 @@ if __name__ == "__main__":
     with strategy.scope():
         if len(config.pretrain) == 0:
             model = dense_net_based_model(
-                input_shape=(257, 382, 4),
+                input_shape=(257, None, 4),
                 n_classes=N_CLASSES,
                 n_layer_per_block=[4, 6, 10, 6],
                 growth_rate=12,
                 activation='softmax',
-                se=config.se)
+                se=config.se,
+                kernel_regularizer=tf.keras.regularizers.l2(1e-4))
         else:
             model = tf.keras.models.load_model(config.pretrain, compile=False)
 
         if config.pretrain:
-            init_lr = 2e-3
+            init_lr = 5e-3
         else:
             init_lr = 1e-2
-        opt = Adam(CosineDecayRestarts(init_lr, 2, m_mul=0.5, alpha=0.1),
+        opt = Adam(CosineDecayRestarts(init_lr, 2, t_mul=1.5, m_mul=0.5, 
+                                       alpha=0.01),
                    clipnorm=0.1)
 
+        '''
         def loss_fn(label_smoothing):
             def _loss(y_true, y_pred):
                 return categorical_crossentropy(y_true, y_pred, 
                                                 label_smoothing=label_smoothing)
             return _loss
+        '''
         
-        model.compile(optimizer=opt, loss=loss_fn(0.1), metrics=['accuracy'])
+        model.compile(optimizer=opt, 
+                      loss='categorical_crossentropy', # loss=loss_fn(0.1),
+                      metrics=['accuracy'])
         model.summary()
 
 
     """ DATA """
     # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
     PATH = '/datasets/ai_challenge/icassp/'
-    ORG_CNT = 5000
-    GEN_CNT = 0 # 2048
+    ORG_CNT = 3000 # 5000
+    GEN_CNT = 5120
 
+    # 1.1. original data
     x = np.load(os.path.join(PATH, 'train_x.npy'))[:ORG_CNT]
     y = np.load(os.path.join(PATH, 'train_y.npy'))[:ORG_CNT]
 
@@ -89,14 +95,25 @@ if __name__ == "__main__":
     y = np.concatenate([y, noise_y, noise_y], axis=0)
     _x, _y = x, y
 
-    x = np.load(PATH+'gen_x.npy')[GEN_CNT:]
-    y = np.load(PATH+'gen_y.npy')[GEN_CNT:]
+    # 1.2. generated data (with different noises)
+    x = np.load(os.path.join(PATH, 'gen_x.npy'))[GEN_CNT:]
+    y = np.load(os.path.join(PATH, 'gen_y.npy'))[GEN_CNT:]
 
     x = np.concatenate([_x, x], axis=0)
     y = np.concatenate([_y, y], axis=0)
 
-    x = normalize_spec(x, log=config.norm_log, minmax=config.minmax_log)
-    y = azimuth_to_classes(y, N_CLASSES)
+    # 1.3. 50 given samples
+    _x = np.load(os.path.join(PATH, '50_x.npy'))
+    _x = np.pad(_x, ((0, 0), (0, 0), (0, x.shape[2]-_x.shape[2]), (0, 0)),
+                'constant')
+    _y = np.load(os.path.join(PATH, '50_y.npy'))
+
+    x = np.concatenate([_x, x], axis=0)
+    y = np.concatenate([_y, y], axis=0)
+    
+    # aggregate and normalize
+    x = normalize_spec(x, norm=config.norm)
+    y = azimuth_to_classes(y, N_CLASSES, smoothing=True)
 
     # 2. SPLITTING TRAIN AND VALIDATION SET
     train_size = x.shape[0] - x.shape[0] % BATCH_SIZE
@@ -128,11 +145,12 @@ if __name__ == "__main__":
                                    train=False)
 
         callbacks = [
-            tf.keras.callbacks.EarlyStopping(monitor='val_loss',
-                                             patience=40),
+            tf.keras.callbacks.EarlyStopping(monitor='val_accuracy',
+                                             patience=50 if config.norm else 25),
             tf.keras.callbacks.CSVLogger(config.model_name + '.log',
                                          append=True),
             tf.keras.callbacks.ModelCheckpoint(config.model_name+'.h5',
+                                               monitor='val_accuracy',
                                                save_best_only=True),
             tf.keras.callbacks.TerminateOnNaN()
         ]

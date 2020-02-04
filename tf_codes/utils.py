@@ -1,10 +1,45 @@
-import tensorflow as tf
 import numpy as np
+import os
+import tensorflow as tf
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
+EPSILON = 1e-8
+LOG_EPSILON = np.log(EPSILON)
 
 
-def azimuth_to_classes(azimuth, n_classes, one_hot=True):
+def from_wav_to_npy(path, name=None):
+    import torch
+    import torchaudio
+
+    files = sorted(os.listdir(path))
+    npy = []
+    max_len = 0
+
+    stft = torchaudio.transforms.Spectrogram(512, power=None)
+
+    for f in files:
+        data, sample_rate = torchaudio.load(os.path.join(path, f))
+        data = torchaudio.compliance.kaldi.resample_waveform(data,
+                                                             sample_rate,
+                                                             16000)
+        data = stft(data)
+        data = torch.cat(torchaudio.functional.magphase(data))
+        data = data.numpy().transpose(1, 2, 0) # freq, time, chan
+        npy.append(data)
+
+        if data.shape[1] > max_len:
+            max_len = data.shape[1]
+
+    def pad(x, max_len):
+        return np.pad(x, ((0, 0), (0, max_len-x.shape[1]), (0, 0)), 'constant')
+
+    npy = np.stack(tuple(map(lambda x: pad(x, max_len), npy)))
+    if name is None:
+        name = '__default__.npy'
+    np.save(name, npy)
+    
+
+def azimuth_to_classes(azimuth, n_classes, one_hot=True, smoothing=False):
     assert n_classes in [2, 10, 11]
 
     if n_classes == 2:
@@ -15,6 +50,18 @@ def azimuth_to_classes(azimuth, n_classes, one_hot=True):
         mask = np.equal(azimuth, -1).astype(np.int32)
         classes = mask * 10 + (1 - mask) * azimuth // 20
     if one_hot:
+        if smoothing and n_classes == 11:
+            return np.array([[.95, .05, 0., 0., 0., 0., 0., 0., 0., 0., 0.],
+                             [.05, .9, .05, 0., 0., 0., 0., 0., 0., 0., 0.],
+                             [0., .05, .9, .05, 0., 0., 0., 0., 0., 0., 0.],
+                             [0., 0., .05, .9, .05, 0., 0., 0., 0., 0., 0.],
+                             [0., 0., 0., .05, .9, .05, 0., 0., 0., 0., 0.],
+                             [0., 0., 0., 0., .05, .9, .05, 0., 0., 0., 0.],
+                             [0., 0., 0., 0., 0., .05, .9, .05, 0., 0., 0.],
+                             [0., 0., 0., 0., 0., 0., .05, .9, .05, 0., 0.],
+                             [0., 0., 0., 0., 0., 0., 0., .05, .9, .05, 0.],
+                             [0., 0., 0., 0., 0., 0., 0., 0., .05, .95, 0.],
+                             [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 1.]])[classes]
         return np.eye(n_classes, dtype=np.float32)[classes]
     else:
         return classes
@@ -26,17 +73,43 @@ def class_to_azimuth(classes):
     return azimuth
 
 
-def normalize_spec(x, log=True, minmax=False, chan=(0, 1)):
+@tf.function
+def challenge_score(y_true, y_pred):
+    y_true = to_degrees(tf.argmax(y_true, axis=1))
+    y_pred = to_degrees(tf.argmax(y_pred, axis=1))
+    return score(y_true, y_pred)
+
+
+@tf.function
+def score(y_true, y_pred):
+    mask = tf.math.logical_xor(tf.equal(y_true, -1),
+                               tf.equal(y_pred, -1))
+    mask = tf.cast(mask, tf.float32)
+    diff = tf.cast(y_true, tf.float32) - tf.cast(y_pred, tf.float32)
+    diff = mask*180 + (1-mask)*diff
+    diff *= np.pi / 180
+    return tf.reduce_mean(tf.pow(diff, 2))
+
+
+@tf.function
+def to_degrees(dist):
+    mask = tf.cast(tf.equal(dist, 10), dist.dtype)
+    degrees = mask*-1 + (1-mask)*dist*20
+    return degrees
+
+
+def normalize_spec(x, norm, chan=(0, 1)):
     x = x.copy()
-    if log:
-        x[:, :, :, chan] = np.log(x[:, :, :, chan] + 1e-8)
-    if minmax:
-        x -= np.min(x, axis=(1, 2), keepdims=True)
-        x /= np.max(x, axis=(1, 2), keepdims=True) + 1e-8
+    if norm:
+        # x /= np.max(x, axis=(1, 2), keepdims=True) + EPSILON
+        x[:, :, :, chan] /= (np.max(x[:, :, :, chan],
+                                    axis=(1, 2),
+                                    keepdims=True) + EPSILON) / 10.
+    x[:, :, :, chan] = np.log(x[:, :, :, chan] + EPSILON)
     return x
 
 
-def augment(mask=True, equalizer=True, roll=False):
+def augment(mask=True, equalizer=True, roll=False, flip=False):
     def _aug(x, y):
         if mask:
             x = freq_mask(x)
@@ -45,43 +118,50 @@ def augment(mask=True, equalizer=True, roll=False):
             x = random_equalizer(x)
         if roll:
             x = random_roll(x)
+        if flip:
+            x = x[:, :, (1, 0, 3, 2)]
+            assert y.shape[1] == 11
+            y[:, :10] = y[:, 9::-1]
         return x, y
     return _aug
 
 
-def freq_mask(spec, max_mask_size=6, mask_num=2):
-    freq, time, _ = spec.shape
+def freq_mask(spec, max_mask_size=8, mask_num=4):
+    freq, time, chan = spec.shape
     mask = tf.ones(shape=(freq, 1, 1), dtype=tf.float32)
 
     for i in range(mask_num):
-        size = tf.random.uniform([], minval=0, maxval=max_mask_size, dtype=tf.int32)
-        offset = tf.random.uniform([], minval=0, maxval=freq-size, dtype=tf.int32)
+        size = tf.random.uniform([], maxval=max_mask_size, dtype=tf.int32)
+        offset = tf.random.uniform([], maxval=freq-size, dtype=tf.int32)
 
-        mask *= tf.concat((tf.ones(shape=(offset, 1, 1)),
-                           tf.zeros(shape=(size, 1, 1)),
-                           tf.ones(shape=(freq-size-offset, 1, 1))),
-                           0)
+        mask = tf.cond(
+            tf.random.uniform([]) > 0.5,
+            lambda: mask*tf.concat((tf.ones(shape=(offset, 1, 1)),
+                                    tf.zeros(shape=(size, 1, 1)),
+                                    tf.ones(shape=(freq-size-offset, 1, 1))),
+                                   0),
+            lambda: mask)
     spec = spec * mask
-    pad = tf.random.uniform([], dtype=tf.float32) * (1 - mask)
-    spec += pad
     return tf.cast(spec, dtype=tf.float32)
 
 
-def time_mask(spec, max_mask_size=24, mask_num=2):
-    freq, time, _ = spec.shape
+def time_mask(spec, max_mask_size=32, mask_num=4):
+    freq, time, chan = spec.shape
     mask = tf.ones(shape=(1, time, 1), dtype=tf.float32)
 
     for i in range(mask_num):
-        size = tf.random.uniform([], minval=0, maxval=max_mask_size, dtype=tf.int32)
-        offset = tf.random.uniform([], minval=0, maxval=time-size, dtype=tf.int32)
+        size = tf.random.uniform([], maxval=max_mask_size, dtype=tf.int32)
+        offset = tf.random.uniform([], maxval=time-size, dtype=tf.int32)
 
-        mask *= tf.concat((tf.ones(shape=(1, offset, 1)),
-                           tf.zeros(shape=(1, size, 1)),
-                           tf.ones(shape=(1, time-size-offset, 1))),
-                           1)
+        mask = tf.cond(
+            tf.random.uniform([]) > 0.5,
+            lambda: mask*tf.concat((tf.ones(shape=(1, offset, 1)),
+                                    tf.zeros(shape=(1, size, 1)),
+                                    tf.ones(shape=(1, time-size-offset, 1))),
+                                   1),
+            lambda: mask)
+
     spec = spec * mask
-    pad = tf.random.uniform([], dtype=tf.float32) * (1 - mask)
-    spec += pad
     return tf.cast(spec, dtype=tf.float32)
 
 
@@ -94,17 +174,17 @@ def random_equalizer(spec):
         weight = tf.random.uniform([], maxval=maxval, dtype=tf.float32)
         return tf.math.cos(tf.linspace(left, left+right, freq)) * weight
 
-    equalizer = _gen(0.2) + _gen(0.2) + 1
+    equalizer = tf.random.uniform([], minval=0.6, maxval=1.6, dtype=tf.float32)
+    equalizer = tf.math.log(equalizer + _gen(0.2) + _gen(0.2))
     equalizer = tf.expand_dims(tf.expand_dims(equalizer, 1), 1)
     equalizer = tf.concat((tf.tile(equalizer, [1, 1, chan//2]),
-                           tf.ones(shape=(freq, 1, chan//2))),
+                           tf.zeros(shape=(freq, 1, chan//2))),
                            2)
-    return spec * equalizer
+    return spec + equalizer
 
 
 def random_roll(spec):
     freq, time, chan = spec.shape
-
     shift = tf.random.uniform([], maxval=time, dtype=tf.int32)
     return tf.roll(spec, shift=shift, axis=1)
 
@@ -113,6 +193,6 @@ def make_dataset(x, y, n_proc, batch_per_node, train=False, **kwargs):
     dataset = tf.data.Dataset.from_tensor_slices((x, y)).cache()
     if train:
         dataset = dataset.map(augment(**kwargs), num_parallel_calls=AUTOTUNE)
-        dataset = dataset.repeat().shuffle(buffer_size=6000)
+        dataset = dataset.repeat().shuffle(buffer_size=12000)
     return dataset.batch(batch_per_node, drop_remainder=True).prefetch(AUTOTUNE)
 

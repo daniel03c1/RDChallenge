@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
@@ -39,21 +40,27 @@ def violin_plot(data, labels, img_name):
     plt.savefig(img_name)
 
 
-def visualize_loss(model_names, titles=None):
+def visualize_loss(pattern='*.log', train=True, val=True):
+    if isinstance(pattern, list):
+        model_names = pattern
+    else:
+        model_names = sorted(glob.glob(pattern))
+    print(model_names)
     n_models = len(model_names)
-    if titles is None:
-        titles = model_names
-    fig, axes = plt.subplots(1, n_models)
+    fig, axes = plt.subplots(1, 2)
 
     for i in range(n_models):
         model_name = model_names[i]
-        table = pd.read_csv(model_name+'.log')
-        axes[i].set_ylim([0, 4.])
-        axes[i].plot(table['loss'], label='train_loss')
-        axes[i].plot(table['val_loss'], label='val_loss')
-        axes[i].set_title(titles[i])
+        table = pd.read_csv(model_name)
+        if train:
+            axes[0].plot(table['loss'], label=model_name+'_train_loss')
+            axes[1].plot(table['accuracy'], label=model_name+'_train_acc')
+        if val:
+            axes[0].plot(table['val_loss'], label=model_name+'_val_loss')
+            axes[1].plot(table['val_accuracy'], label=model_name+'_val_acc')
 
-    plt.legend()
+    axes[0].legend()
+    axes[1].legend()
     plt.show()
 
 

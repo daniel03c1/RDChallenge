@@ -5,6 +5,9 @@ from utils import *
 
 
 class UtilsTest(unittest.TestCase):
+    def test_from_wav_to_npy(self):
+        from_wav_to_npy('../../ai_challenge/samples/')
+
     def test_azimuth_to_classes(self):
         azimuth = [-1, 0, 20, 40, 60, 80, 100, 120, 140, 160, 180]
         target = [10, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
