@@ -2,10 +2,10 @@ import argparse
 import numpy as np
 import os
 import tensorflow as tf
+from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
-from multiprocessing import Pool
 from tensorflow.keras.experimental import CosineDecay, CosineDecayRestarts
 import keras
 
@@ -22,7 +22,9 @@ args.add_argument('--augment', type=bool, default=True)
 args.add_argument('--mask', type=bool, default=True)
 args.add_argument('--equalizer', type=bool, default=True)
 args.add_argument('--roll', type=bool, default=True)
+args.add_argument('--flip', type=bool, default=False)
 args.add_argument('--se', type=bool, default=False)
+args.add_argument('--ratio', type=float, default=1.)
 args.add_argument('--task', type=str, required=True, 
                   choices=('vad', 'both'))
 
@@ -43,74 +45,41 @@ if __name__ == "__main__":
     else:
         N_CLASSES = 11
 
-    """ MODEL """
-    with strategy.scope():
-        if len(config.pretrain) == 0:
-            model = dense_net_based_model(
-                input_shape=(257, None, 4),
-                n_classes=N_CLASSES,
-                n_layer_per_block=[4, 6, 10, 6],
-                growth_rate=12,
-                activation='softmax',
-                se=config.se,
-                kernel_regularizer=tf.keras.regularizers.l2(1e-4))
-        else:
-            model = tf.keras.models.load_model(config.pretrain, compile=False)
-
-        if config.pretrain:
-            init_lr = 5e-3
-        else:
-            init_lr = 1e-2
-        opt = Adam(CosineDecayRestarts(init_lr, 2, t_mul=1.5, m_mul=0.5, 
-                                       alpha=0.01),
-                   clipnorm=0.1)
-
-        '''
-        def loss_fn(label_smoothing):
-            def _loss(y_true, y_pred):
-                return categorical_crossentropy(y_true, y_pred, 
-                                                label_smoothing=label_smoothing)
-            return _loss
-        '''
-        
-        model.compile(optimizer=opt, 
-                      loss='categorical_crossentropy', # loss=loss_fn(0.1),
-                      metrics=['accuracy'])
-        model.summary()
-
+    freq = int(config.ratio * 257)
 
     """ DATA """
     # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
     PATH = '/datasets/ai_challenge/icassp/'
-    ORG_CNT = 3000 # 5000
-    GEN_CNT = 5120
+    ORG_CNT = 5000
+    GEN_CNT = 8192
+
+    x = []
+    y = []
 
     # 1.1. original data
-    x = np.load(os.path.join(PATH, 'train_x.npy'))[:ORG_CNT]
-    y = np.load(os.path.join(PATH, 'train_y.npy'))[:ORG_CNT]
+    x.append(np.load(os.path.join(PATH, 'train_x.npy'))[:ORG_CNT])
+    y.append(np.load(os.path.join(PATH, 'train_y.npy'))[:ORG_CNT])
 
-    noise_x = np.load(os.path.join(PATH, 'noise_only_x.npy'))[:66]
-    x = np.concatenate([x, noise_x, noise_x[:, :, :, (1, 0, 3, 2)]], axis=0)
-    noise_y = np.load(os.path.join(PATH, 'noise_only_y.npy'))[:66]
-    y = np.concatenate([y, noise_y, noise_y], axis=0)
-    _x, _y = x, y
+    x.append(np.load(os.path.join(PATH, 'noise_only_x.npy'))[:66])
+    y.append(np.load(os.path.join(PATH, 'noise_only_y.npy'))[:66])
 
     # 1.2. generated data (with different noises)
-    x = np.load(os.path.join(PATH, 'gen_x.npy'))[GEN_CNT:]
-    y = np.load(os.path.join(PATH, 'gen_y.npy'))[GEN_CNT:]
+    x.append(np.load(os.path.join(PATH, 'gen_x.npy'))[:GEN_CNT])
+    y.append(np.load(os.path.join(PATH, 'gen_y.npy'))[:GEN_CNT])
 
-    x = np.concatenate([_x, x], axis=0)
-    y = np.concatenate([_y, y], axis=0)
+    # 1.3. new 1000 samples
+    x.append(np.load(os.path.join(PATH, 'new_train_x.npy')))
+    y.append(np.load(os.path.join(PATH, 'new_train_y.npy')))
 
-    # 1.3. 50 given samples
-    _x = np.load(os.path.join(PATH, '50_x.npy'))
-    _x = np.pad(_x, ((0, 0), (0, 0), (0, x.shape[2]-_x.shape[2]), (0, 0)),
-                'constant')
-    _y = np.load(os.path.join(PATH, '50_y.npy'))
+    x.append(np.load(os.path.join(PATH, 'new_train_x2.npy')))
+    y.append(np.load(os.path.join(PATH, 'new_train_y2.npy')))
 
-    x = np.concatenate([_x, x], axis=0)
-    y = np.concatenate([_y, y], axis=0)
+    x = np.concatenate(x, axis=0)
+    y = np.concatenate(y, axis=0)
     
+    # split input data
+    x = x[:, :int(config.ratio * 257)]
+
     # aggregate and normalize
     x = normalize_spec(x, norm=config.norm)
     y = azimuth_to_classes(y, N_CLASSES, smoothing=True)
@@ -132,27 +101,65 @@ if __name__ == "__main__":
 
     """ MODEL """
     with strategy.scope():
+        if len(config.pretrain) == 0:
+            freq, time, chan = x.shape[1:]
+
+            model = dense_net_based_model(
+                input_shape=(freq, None, chan),
+                n_classes=N_CLASSES,
+                n_layer_per_block=[4, 6, 10, 6],
+                growth_rate=12,
+                activation='softmax',
+                se=config.se,
+                kernel_regularizer=tf.keras.regularizers.l2(1e-5))
+        else:
+            model = tf.keras.models.load_model(config.pretrain, compile=False)
+
+        if config.pretrain:
+            init_lr = 5e-3
+        else:
+            init_lr = 1e-2
+        # lr = CosineDecayRestarts(init_lr, 2, t_mul=1.5, m_mul=0.5, alpha=0.01)
+        lr = tf.optimizers.schedules.PiecewiseConstantDecay(
+                [750, 75000, 75000],
+                [0.1, 0.01, 0.001, 0.0001])
+        # opt = SGD(lr, momentum=0.9, nesterov=True)
+        '''
+        lr = tf.optimizers.schedules.PiecewiseConstantDecay(
+                [5000, 10000],
+                [0.01, 0.001, 0.0005])
+        '''
+        opt = Adam(lr)
+
+        model.compile(optimizer=opt, 
+                      loss='categorical_crossentropy',
+                      metrics=['accuracy'])
+        model.summary()
+
+    """ TRAINING """
+    with strategy.scope():
         train_dataset = make_dataset(x, y, 
                                      n_proc=strategy.num_replicas_in_sync,
                                      batch_per_node=BATCH_SIZE,
                                      train=config.augment,
                                      mask=config.mask,
                                      equalizer=config.equalizer,
-                                     roll=config.roll)
+                                     roll=config.roll,
+                                     flip=config.flip)
         val_dataset = make_dataset(val_x, val_y, 
                                    n_proc=strategy.num_replicas_in_sync,
                                    batch_per_node=BATCH_SIZE,
                                    train=False)
 
         callbacks = [
-            tf.keras.callbacks.EarlyStopping(monitor='val_accuracy',
-                                             patience=50 if config.norm else 25),
-            tf.keras.callbacks.CSVLogger(config.model_name + '.log',
-                                         append=True),
-            tf.keras.callbacks.ModelCheckpoint(config.model_name+'.h5',
-                                               monitor='val_accuracy',
-                                               save_best_only=True),
-            tf.keras.callbacks.TerminateOnNaN()
+            EarlyStopping(monitor='val_accuracy',
+                          patience=50 if config.norm else 35),
+            CSVLogger(config.model_name + '.log',
+                      append=True),
+            ModelCheckpoint(config.model_name+'.h5',
+                            monitor='val_accuracy',
+                            save_best_only=True),
+            TerminateOnNaN()
         ]
 
         model.fit(train_dataset,

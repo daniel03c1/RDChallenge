@@ -51,6 +51,7 @@ def visualize_loss(pattern='*.log', train=True, val=True):
 
     for i in range(n_models):
         model_name = model_names[i]
+        print(model_name)
         table = pd.read_csv(model_name)
         if train:
             axes[0].plot(table['loss'], label=model_name+'_train_loss')

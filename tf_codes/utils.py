@@ -18,6 +18,8 @@ def from_wav_to_npy(path, name=None):
     stft = torchaudio.transforms.Spectrogram(512, power=None)
 
     for f in files:
+        if not f.endswith('.wav'):
+            continue
         data, sample_rate = torchaudio.load(os.path.join(path, f))
         data = torchaudio.compliance.kaldi.resample_waveform(data,
                                                              sample_rate,
@@ -101,10 +103,9 @@ def to_degrees(dist):
 def normalize_spec(x, norm, chan=(0, 1)):
     x = x.copy()
     if norm:
-        # x /= np.max(x, axis=(1, 2), keepdims=True) + EPSILON
         x[:, :, :, chan] /= (np.max(x[:, :, :, chan],
                                     axis=(1, 2),
-                                    keepdims=True) + EPSILON) / 10.
+                                    keepdims=True) + EPSILON) 
     x[:, :, :, chan] = np.log(x[:, :, :, chan] + EPSILON)
     return x
 
@@ -119,14 +120,12 @@ def augment(mask=True, equalizer=True, roll=False, flip=False):
         if roll:
             x = random_roll(x)
         if flip:
-            x = x[:, :, (1, 0, 3, 2)]
-            assert y.shape[1] == 11
-            y[:, :10] = y[:, 9::-1]
+            x, y = random_flip(x, y)
         return x, y
     return _aug
 
 
-def freq_mask(spec, max_mask_size=8, mask_num=4):
+def freq_mask(spec, max_mask_size=32, mask_num=2):
     freq, time, chan = spec.shape
     mask = tf.ones(shape=(freq, 1, 1), dtype=tf.float32)
 
@@ -145,7 +144,7 @@ def freq_mask(spec, max_mask_size=8, mask_num=4):
     return tf.cast(spec, dtype=tf.float32)
 
 
-def time_mask(spec, max_mask_size=32, mask_num=4):
+def time_mask(spec, max_mask_size=32, mask_num=2):
     freq, time, chan = spec.shape
     mask = tf.ones(shape=(1, time, 1), dtype=tf.float32)
 
@@ -165,7 +164,7 @@ def time_mask(spec, max_mask_size=32, mask_num=4):
     return tf.cast(spec, dtype=tf.float32)
 
 
-def random_equalizer(spec):
+def random_equalizer(spec, mag_only=False):
     freq, time, chan = spec.shape
     
     def _gen(maxval):
@@ -189,10 +188,20 @@ def random_roll(spec):
     return tf.roll(spec, shift=shift, axis=1)
 
 
+def random_flip(spec, label, mag_only=False):
+    assert label.shape[0] == 11
+    label = tf.concat([tf.reverse(label[:10], axis=(0,)),
+                       label[10:]],
+                       axis=0)
+
+    spec = tf.gather(spec, (1, 0, 3, 2), axis=2)
+    return spec, label
+
+
 def make_dataset(x, y, n_proc, batch_per_node, train=False, **kwargs):
     dataset = tf.data.Dataset.from_tensor_slices((x, y)).cache()
     if train:
         dataset = dataset.map(augment(**kwargs), num_parallel_calls=AUTOTUNE)
-        dataset = dataset.repeat().shuffle(buffer_size=12000)
+        dataset = dataset.repeat().shuffle(buffer_size=len(x))
     return dataset.batch(batch_per_node, drop_remainder=True).prefetch(AUTOTUNE)
 

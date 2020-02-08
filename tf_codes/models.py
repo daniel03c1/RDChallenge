@@ -34,11 +34,11 @@ def dense_net_based_model(input_shape,
     if normalization == 'batchnorm':
         x = BatchNormalization()(model_input)
     elif normalization == 'layernorm':
-        x = LayerNormalization()(model_input)
+        x = LayerNormalization(center=False, scale=False)(model_input)
     else:
         x = model_input
 
-    x = GaussianNoise(0.01)(x)
+    x = GaussianNoise(0.025)(x)
     x = Conv2D(filters=growth_rate*2,
                kernel_size=[7, 7],
                padding='same',
@@ -123,13 +123,13 @@ def SE(reduction=2, axis=1, *args, **kwargs):
     return _se
 
 
-def conv_lstm_model(input_shape,
-                    n_classes,
-                    n_layer_per_block,
-                    growth_rate,
-                    normalization='layernorm',
-                    activation='softmax',
-                    *args, **kwargs):
+def dense_net_based_model2(input_shape,
+                          n_classes,
+                          n_layer_per_block,
+                          growth_rate,
+                          normalization='layernorm',
+                          activation='softmax',
+                          *args, **kwargs):
     model_input = Input(shape=input_shape)
     n_block = len(n_layer_per_block)
 
@@ -137,60 +137,37 @@ def conv_lstm_model(input_shape,
     if normalization == 'batchnorm':
         x = BatchNormalization()(model_input)
     elif normalization == 'layernorm':
-        x = LayerNormalization()(model_input)
+        x = LayerNormalization(center=False, scale=False)(model_input)
     else:
         x = model_input
 
-    x = GaussianNoise(0.01)(x)
-    x = ConvLSTM2D(filters=growth_rate*2,
-                   kernel_size=[7, 1],
-                   padding='same',
-                   return_sequences=True,
-                   dropout=0.,
-                   recurrent_dropout=0.,
-                   *args, **kwargs)(x)
-    x = AveragePooling3D((3, 3, 3), strides=(2, 2, 2), padding='same')(x)
+    x = GaussianNoise(0.025)(x)
+    x = Conv2D(filters=growth_rate*2,
+               kernel_size=[7, 7],
+               padding='same',
+               *args, **kwargs)(x)
+    x = MaxPool2D((3, 3), strides=(2, 2), padding='same')(x)
 
     # MIDDLE
-    for i in range(n_block):
-        for _ in range(n_layer_per_block[i]):
-            y = Dropout(0.1)(x)
-            y = conv_lstm(filters=growth_rate,
-                          kernel_size=(1, 1),
-                          return_sequences=True,
-                          *args, **kwargs)(y)
-            y = conv_lstm(filters=growth_rate,
-                          kernel_size=(3, 1),
-                          padding='same',
-                          return_sequences=True,
-                          *args, **kwargs)(y)
-            x = Concatenate(axis=-1)([x, y])
-        
-        if i < n_block-1:
-            x = conv_lstm(filters=growth_rate*4,
-                          kernel_size=(1, 1),
-                          return_sequences=True,
-                          *args, **kwargs)(x)
-            x = AveragePooling3D(padding='same')(x)
-        else:
-            x = conv_lstm(filters=growth_rate*4,
-                          kernel_size=(1, 1),
-                          return_sequences=False,
-                          *args, **kwargs)(x)
+    for i in range(n_block - 1):
+        x = dense_block(n_layer=n_layer_per_block[i],
+                        growth_rate=growth_rate,
+                        se=se,
+                        *args, **kwargs)(x)
+        x = dense_net_conv2d(filters=growth_rate * 4,
+                             kernel_size=[1, 1],
+                             padding='same',
+                             *args, **kwargs)(x)
+        x = AveragePooling2D()(x)
+
     # FINAL
+    x = dense_block(n_layer=n_layer_per_block[-1],
+                    growth_rate=growth_rate,
+                    se=se,
+                    *args, **kwargs)(x)
     x = GlobalAveragePooling2D()(x)
     x = Dense(units=growth_rate*16, activation='relu', *args, **kwargs)(x)
     x = Dense(units=n_classes, activation=activation)(x)
 
     model = tf.keras.Model(inputs=model_input, outputs=x)
     return model
-
-
-def conv_lstm(*args, **kwargs):
-    def _conv_lstm(tensor):
-        x = BatchNormalization()(tensor)
-        x = ReLU()(x)
-        x = ConvLSTM2D(*args, **kwargs)(x)
-        return x
-    return _conv_lstm
-

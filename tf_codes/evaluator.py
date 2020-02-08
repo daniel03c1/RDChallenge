@@ -16,6 +16,7 @@ args = argparse.ArgumentParser()
 args.add_argument('--saved_model', type=str, required=True)
 args.add_argument('--norm', type=bool, default=False)
 args.add_argument('--verbose', type=bool, default=False)
+args.add_argument('--ratio', type=float, default=1.)
 args.add_argument('--task', type=str, default='vad',
                   choices=('vad', 'both'))
 args.add_argument('--dataset', type=str, default='challenge',
@@ -52,6 +53,8 @@ if __name__ == '__main__':
             [np.load(os.path.join(PATH, 'test_y.npy')),
              np.load(os.path.join(PATH, 'noise_only_y.npy'))[66:]],
             axis=0)
+    freq = int(config.ratio * 257)
+    eval_x = eval_x[:, :freq]
     eval_x = normalize_spec(eval_x, norm=config.norm)
     eval_y = azimuth_to_classes(eval_y, N_CLASSES, one_hot=False)
 
