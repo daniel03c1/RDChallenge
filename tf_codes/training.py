@@ -11,6 +11,7 @@ import keras
 
 from models import dense_net_based_model
 from utils import *
+from swa import SWA
 
 
 args = argparse.ArgumentParser()
@@ -20,13 +21,15 @@ args.add_argument('--norm', type=bool, default=False)
 args.add_argument('--cls_weights', type=bool, default=False)
 args.add_argument('--augment', type=bool, default=True)
 args.add_argument('--mask', type=bool, default=True)
-args.add_argument('--equalizer', type=bool, default=True)
+args.add_argument('--equalizer', type=bool, default=False)
 args.add_argument('--roll', type=bool, default=True)
 args.add_argument('--flip', type=bool, default=False)
 args.add_argument('--se', type=bool, default=False)
 args.add_argument('--ratio', type=float, default=1.)
 args.add_argument('--task', type=str, required=True, 
                   choices=('vad', 'both'))
+args.add_argument('--type', type=str, required=True, 
+                  choices=('spec', 'mel'))
 
 
 if __name__ == "__main__":
@@ -36,8 +39,8 @@ if __name__ == "__main__":
     strategy = tf.distribute.MirroredStrategy(devices)
 
     """ HYPER_PARAMETERS """
-    BATCH_SIZE = 64 # per each GPU
-    TOTAL_EPOCH = 750
+    BATCH_SIZE = 256 // len(devices) # per each GPU
+    TOTAL_EPOCH = 150
     VAL_SPLIT = 0.15
 
     if config.task == 'vad':
@@ -50,31 +53,16 @@ if __name__ == "__main__":
     """ DATA """
     # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
     PATH = '/datasets/ai_challenge/icassp/'
-    ORG_CNT = 5000
-    GEN_CNT = 8192
+    prefixes = [
+        'train_', 'gen_', 'new_train_', 'new_train_', 'new_train2_', 'noise_train_']
 
-    x = []
-    y = []
-
-    # 1.1. original data
-    x.append(np.load(os.path.join(PATH, 'train_x.npy'))[:ORG_CNT])
-    y.append(np.load(os.path.join(PATH, 'train_y.npy'))[:ORG_CNT])
-
-    x.append(np.load(os.path.join(PATH, 'noise_only_x.npy'))[:66])
-    y.append(np.load(os.path.join(PATH, 'noise_only_y.npy'))[:66])
-
-    # 1.2. generated data (with different noises)
-    x.append(np.load(os.path.join(PATH, 'gen_x.npy'))[:GEN_CNT])
-    y.append(np.load(os.path.join(PATH, 'gen_y.npy'))[:GEN_CNT])
-
-    # 1.3. new 1000 samples
-    x.append(np.load(os.path.join(PATH, 'new_train_x.npy')))
-    y.append(np.load(os.path.join(PATH, 'new_train_y.npy')))
-
-    x.append(np.load(os.path.join(PATH, 'new_train_x2.npy')))
-    y.append(np.load(os.path.join(PATH, 'new_train_y2.npy')))
-
+    x = [prefix+'x.npy' if config.type=='spec' else prefix+'x_mel.npy'
+         for prefix in prefixes]
+    x = [np.load(os.path.join(PATH, _x)) for _x in x]
     x = np.concatenate(x, axis=0)
+
+    y = [prefix+'y.npy' for prefix in prefixes]
+    y = [np.load(os.path.join(PATH, _y)) for _y in y]
     y = np.concatenate(y, axis=0)
     
     # split input data
@@ -115,25 +103,14 @@ if __name__ == "__main__":
         else:
             model = tf.keras.models.load_model(config.pretrain, compile=False)
 
-        if config.pretrain:
-            init_lr = 5e-3
-        else:
-            init_lr = 1e-2
-        # lr = CosineDecayRestarts(init_lr, 2, t_mul=1.5, m_mul=0.5, alpha=0.01)
         lr = tf.optimizers.schedules.PiecewiseConstantDecay(
                 [750, 75000, 75000],
                 [0.1, 0.01, 0.001, 0.0001])
-        # opt = SGD(lr, momentum=0.9, nesterov=True)
-        '''
-        lr = tf.optimizers.schedules.PiecewiseConstantDecay(
-                [5000, 10000],
-                [0.01, 0.001, 0.0005])
-        '''
-        opt = Adam(lr)
+        opt = SGD(lr, momentum=0.9, nesterov=True)
 
         model.compile(optimizer=opt, 
                       loss='categorical_crossentropy',
-                      metrics=['accuracy'])
+                      metrics=['accuracy', 'AUC'])
         model.summary()
 
     """ TRAINING """
@@ -152,10 +129,11 @@ if __name__ == "__main__":
                                    train=False)
 
         callbacks = [
-            EarlyStopping(monitor='val_accuracy',
-                          patience=50 if config.norm else 35),
+            # EarlyStopping(monitor='val_accuracy',
+            #               patience=50 if config.norm else 25),
             CSVLogger(config.model_name + '.log',
                       append=True),
+            SWA(start_epoch=80, swa_freq=2),
             ModelCheckpoint(config.model_name+'.h5',
                             monitor='val_accuracy',
                             save_best_only=True),
@@ -168,3 +146,16 @@ if __name__ == "__main__":
                   steps_per_epoch=x.shape[0]//BATCH_SIZE,
                   callbacks=callbacks,
                   class_weight=class_weight)
+
+        model.evaluate(val_dataset, verbose=1)
+
+        # For SWA
+        repeat = x.shape[0] // BATCH_SIZE
+        for x, y in train_dataset:
+            model(x, training=True)
+            repeat -= 1
+            if repeat <= 0:
+                break
+
+        model.evaluate(val_dataset, verbose=1)
+        model.save(config.model_name+"_SWA.h5")

@@ -7,40 +7,6 @@ EPSILON = 1e-8
 LOG_EPSILON = np.log(EPSILON)
 
 
-def from_wav_to_npy(path, name=None):
-    import torch
-    import torchaudio
-
-    files = sorted(os.listdir(path))
-    npy = []
-    max_len = 0
-
-    stft = torchaudio.transforms.Spectrogram(512, power=None)
-
-    for f in files:
-        if not f.endswith('.wav'):
-            continue
-        data, sample_rate = torchaudio.load(os.path.join(path, f))
-        data = torchaudio.compliance.kaldi.resample_waveform(data,
-                                                             sample_rate,
-                                                             16000)
-        data = stft(data)
-        data = torch.cat(torchaudio.functional.magphase(data))
-        data = data.numpy().transpose(1, 2, 0) # freq, time, chan
-        npy.append(data)
-
-        if data.shape[1] > max_len:
-            max_len = data.shape[1]
-
-    def pad(x, max_len):
-        return np.pad(x, ((0, 0), (0, max_len-x.shape[1]), (0, 0)), 'constant')
-
-    npy = np.stack(tuple(map(lambda x: pad(x, max_len), npy)))
-    if name is None:
-        name = '__default__.npy'
-    np.save(name, npy)
-    
-
 def azimuth_to_classes(azimuth, n_classes, one_hot=True, smoothing=False):
     assert n_classes in [2, 10, 11]
 
@@ -125,7 +91,7 @@ def augment(mask=True, equalizer=True, roll=False, flip=False):
     return _aug
 
 
-def freq_mask(spec, max_mask_size=32, mask_num=2):
+def freq_mask(spec, max_mask_size=32, mask_num=3):
     freq, time, chan = spec.shape
     mask = tf.ones(shape=(freq, 1, 1), dtype=tf.float32)
 
@@ -144,7 +110,7 @@ def freq_mask(spec, max_mask_size=32, mask_num=2):
     return tf.cast(spec, dtype=tf.float32)
 
 
-def time_mask(spec, max_mask_size=32, mask_num=2):
+def time_mask(spec, max_mask_size=32, mask_num=3):
     freq, time, chan = spec.shape
     mask = tf.ones(shape=(1, time, 1), dtype=tf.float32)
 
@@ -173,8 +139,9 @@ def random_equalizer(spec, mag_only=False):
         weight = tf.random.uniform([], maxval=maxval, dtype=tf.float32)
         return tf.math.cos(tf.linspace(left, left+right, freq)) * weight
 
-    equalizer = tf.random.uniform([], minval=0.6, maxval=1.6, dtype=tf.float32)
-    equalizer = tf.math.log(equalizer + _gen(0.2) + _gen(0.2))
+    # equalizer = tf.random.uniform([], minval=0.6, maxval=1.6, dtype=tf.float32)
+    # equalizer = tf.math.log(equalizer + _gen(0.2) + _gen(0.2))
+    equalizer = tf.math.log(1 + _gen(0.2) + _gen(0.2))
     equalizer = tf.expand_dims(tf.expand_dims(equalizer, 1), 1)
     equalizer = tf.concat((tf.tile(equalizer, [1, 1, chan//2]),
                            tf.zeros(shape=(freq, 1, chan//2))),

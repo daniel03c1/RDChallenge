@@ -47,11 +47,11 @@ if __name__ == '__main__':
     else:
         eval_x = np.concatenate(
             [np.load(os.path.join(PATH, 'test_x.npy')),
-             np.load(os.path.join(PATH, 'noise_only_x.npy'))[66:]],
+             np.load(os.path.join(PATH, 'noise_test_x.npy'))],
             axis=0)
         eval_y = np.concatenate(
             [np.load(os.path.join(PATH, 'test_y.npy')),
-             np.load(os.path.join(PATH, 'noise_only_y.npy'))[66:]],
+             np.load(os.path.join(PATH, 'noise_test_y.npy'))],
             axis=0)
     freq = int(config.ratio * 257)
     eval_x = eval_x[:, :freq]
