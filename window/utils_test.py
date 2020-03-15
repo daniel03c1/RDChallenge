@@ -33,6 +33,27 @@ class UtilsTest(unittest.TestCase):
         windows = sequence_to_windows(sequence, 3, 2, padding=False)
         self.assertEqual(targets, windows.tolist())
 
+    def test_windows_to_sequence(self):
+        windows = [ # window: (-1, 0, 1)
+            [0., 1., 1.],
+            [1., .5, .5],
+            [0., 0., 0.]
+        ]
+        self.assertEqual(
+            [1., .5, .25],
+            windows_to_sequence(windows, 1, 1).tolist())
+
+        windows = [ # window: (-3, -1, 0, 1, 3)
+            [0, 0, 1, 2, 4],
+            [0, 1, 2, 3, 5],
+            [0, 2, 3, 4, 0],
+            [1, 3, 4, 5, 0],
+            [2, 4, 5, 0, 0]
+        ]
+        self.assertEqual(
+            [1, 2, 3, 4, 5],
+            windows_to_sequence(windows, 3, 2).tolist())
+
     def test_pad(self):
         arr = np.array([1, 2, 3])
         self.assertEqual([-1, -1, 1, 2, 3, -1, -1],

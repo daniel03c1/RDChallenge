@@ -32,9 +32,17 @@ def sequence_to_windows(sequence,
 
 def windows_to_sequence(windows,
                         pad_size,
-                        step_size,
-                        padding=True):
-    pass
+                        step_size):
+    windows = np.array(windows)
+    sequence = np.zeros((windows.shape[0],), dtype=np.float32)
+    indices = np.arange(1, windows.shape[0]+1)
+    indices = sequence_to_windows(indices, pad_size, step_size, True)
+
+    for i in range(windows.shape[0]):
+        pred = windows[np.where(indices-1 == i)]
+        sequence[i] = pred.mean()
+    
+    return sequence
 
 
 def pad(spec, pad_size, axis, const_value):

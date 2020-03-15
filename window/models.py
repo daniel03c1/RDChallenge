@@ -23,28 +23,29 @@ def suggestion(input_shape,
 
     # FRONT
     x = BatchNormalization()(model_input)
+    x = K.expand_dims(x, axis=-1)
 
     x = Conv2D(filters=growth_rate*2,
                kernel_size=[7, 7],
                padding='same',
-               *args, **kwargs)(x)
+               **kwargs)(x)
     x = AveragePooling2D((3, 3), strides=(1, 2), padding='same')(x)
 
     # MIDDLE
     for i in range(n_block - 1):
         x = dense_block(n_layer=n_layer_per_block[i],
                         growth_rate=growth_rate,
-                        *args, **kwargs)(x)
+                        **kwargs)(x)
         x = dense_net_conv2d(filters=growth_rate * 4,
                              kernel_size=[1, 1],
                              padding='same',
-                             *args, **kwargs)(x)
+                             **kwargs)(x)
         x = AveragePooling2D(strides=(1, 2), padding='same')(x)
 
     # FINAL
     x = dense_block(n_layer=n_layer_per_block[-1],
                     growth_rate=growth_rate,
-                    *args, **kwargs)(x)
+                    **kwargs)(x)
     print(x.shape)
     _, time, bins, chan = x.shape
 
@@ -118,6 +119,20 @@ def dnn(input_shape, dropout_rate=0.5, **kwargs):
         x = BatchNormalization()(x)
         x = Dense(512, activation='relu')(x)
         x = Dropout(dropout_rate)(x)
+    x = Dense(1, activation='sigmoid')(x)
+    return tf.keras.Model(inputs=model_input, outputs=x)
+
+
+def bdnn(input_shape, dropout_rate=0.5, **kwargs):
+    model_input = Input(shape=input_shape)
+
+    x = Flatten()(model_input)
+    for i in range(2):
+        x = BatchNormalization()(x)
+        x = Dense(512, activation='relu')(x)
+        x = Dropout(dropout_rate)(x)
     x = Dense(input_shape[0], activation='sigmoid')(x)
     return tf.keras.Model(inputs=model_input, outputs=x)
+
+
 
