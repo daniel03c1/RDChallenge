@@ -26,6 +26,16 @@ class UtilsTest(unittest.TestCase):
         windows = sequence_to_windows(sequence, 3, 2, padding=True)
         self.assertEqual(targets, windows.tolist())
 
+        # With Padding (skip=2)
+        targets = [ # window: (-3, -1, 0, 1, 3)
+            [[0, 0], [0, 0], [0, 9], [1, 8], [3, 6]],
+            [[0, 0], [1, 8], [2, 7], [3, 6], [5, 4]],
+            [[1, 8], [3, 6], [4, 5], [5, 4], [0, 0]],
+            [[3, 6], [5, 4], [6, 3], [0, 0], [0, 0]]
+        ]
+        windows = sequence_to_windows(sequence, 3, 2, skip=2, padding=True)
+        self.assertEqual(targets, windows.tolist())
+
         # Without Padding
         targets = [
             [[0, 9], [2, 7], [3, 6], [4, 5], [6, 3]]

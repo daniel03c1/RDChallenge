@@ -18,13 +18,16 @@ args = argparse.ArgumentParser()
 args.add_argument('--name', type=str, default='model')
 args.add_argument('--pad_size', type=int, default=19)
 args.add_argument('--step_size', type=int, default=9)
-args.add_argument('--model', type=str, default='test2')
+args.add_argument('--model', type=str, default='bdnn')
 args.add_argument('--lr', type=float, default=0.1)
 args.add_argument('--gpus', type=str, default='0,1')
-args.add_argument('--skip', type=int, default=3)
+args.add_argument('--skip', type=int, default=2)
+args.add_argument('--noise_aug', action='store_true')
+args.add_argument('--voice_aug', action='store_true')
+args.add_argument('--aug', action='store_true')
 
 
-def mask(spec, max_ratio, axis=0, fill_value=0):
+def mask(spec, max_ratio, axis=0):
     total = spec.shape[axis]
     max_mask_size = int(total * max_ratio)
     mask_shape = tuple(1 if i != axis else -1 
@@ -39,22 +42,23 @@ def mask(spec, max_ratio, axis=0, fill_value=0):
                      0)
     mask = tf.reshape(mask, mask_shape)
 
-    fill_value = tf.reduce_min(spec) # TEST
-    spec = spec * mask + fill_value * (1-mask)
-    return tf.cast(spec, dtype=tf.float32)
+    fill_value = tf.reduce_min(spec)
+    new_spec = spec * mask + fill_value * (1-mask)
+    return new_spec # tf.cast(new_spec, dtype=tf.float32)
 
 
 def window_dataset_from_list(padded_x_list, padded_y_list, 
                              pad_size, step_size, 
-                             batch_per_node, train=False):
+                             batch_per_node, train=False, aug=True):
     def augment(x, y):
-        x = mask(x, 0.2, 1, fill_value=(LOG_EPSILON-4.5252)/2.6146)
+        x = mask(x, 0.2, 1)
         return x, y
 
     dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
     if train:
-        dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
-        dataset = dataset.repeat().shuffle(buffer_size=1000000) # len(padded_x_list))
+        dataset = dataset.repeat().shuffle(buffer_size=1000000) 
+        if aug:
+            dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
     return dataset.batch(batch_per_node, drop_remainder=True).prefetch(AUTOTUNE)
 
 
@@ -77,26 +81,41 @@ if __name__ == "__main__":
     PATH = '/datasets/ai_challenge/' # inside a docker container
     if not os.path.isdir(PATH): # outside... 
         PATH = '/media/data1/datasets/ai_challenge/'
-    PATH = os.path.join(PATH, 'TIMIT_NOISEX_extended/')
-
-    TRAINPATH = os.path.join(PATH, 'TRAIN')
-    TESTPATH = os.path.join(PATH, 'TEST')
+    TESTPATH = os.path.join(PATH, 'TIMIT_NOISEX_extended/TEST')
+    TRAINPATH = os.path.join(PATH, 'TIMIT_noisex3/')
 
     x, val_x = [], []
     y, val_y = [], []
 
-    for snr in ['-20', '-15', '-5', '0', '5', '10']:
-        x += pickle.load(open(os.path.join(TRAINPATH, f'snr{snr}.pickle'), 'rb'))
-        val_x += pickle.load(open(os.path.join(TESTPATH, f'snr{snr}_test.pickle'), 'rb'))
+    snrs = ['-20', '-15', '-5', '0', '5', '10']
 
-    for i in range(6):
-        y += pickle.load(open(os.path.join(TRAINPATH, 'phn.pickle'), 'rb'))
+    tail = '.pickle' if config.noise_aug else '_no_noise_aug.pickle'
+    speed = ['09', '10', '11'] if config.voice_aug else ['10']
+
+    for snr in snrs:
+        for s in speed:
+            x += pickle.load(
+                open(os.path.join(TRAINPATH, f'snr{snr}_{s}{tail}'), 'rb'))
+        
+        val_x += pickle.load(
+            open(os.path.join(TESTPATH, f'snr{snr}_test.pickle'), 'rb'))
+
+    for i in range(len(snrs)):
+        for s in speed:
+            y += pickle.load(
+                open(os.path.join(TRAINPATH, f'label_{s}.pickle'), 'rb'))
+
         val_y += pickle.load(open(os.path.join(TESTPATH, 'phn_test.pickle'), 'rb'))
+
+    # fix mismatch 
+    for i in range(len(x)):
+        x[i] = x[i][:, :len(y[i])]
 
     """ MODEL """
     with strategy.scope(): 
         time, freq = WINDOW_SIZE, x[0].shape[0]
 
+        print(config.model)
         model = getattr(models, config.model)(
             input_shape=(WINDOW_SIZE, freq),
             kernel_regularizer=tf.keras.regularizers.l2(1e-5))
@@ -104,19 +123,19 @@ if __name__ == "__main__":
         model.compile(optimizer=SGD(config.lr, momentum=0.9),
                       loss='binary_crossentropy',
                       metrics=['accuracy', 'AUC'])
-        model.summary()
+        # model.summary()
 
     """ DATA """
     # 2. DATA PRE-PROCESSING
     x = np.concatenate(
         list(map(preprocess_spec(config, skip=config.skip), x)), axis=0)
     val_x = np.concatenate(
-        list(map(preprocess_spec(config, skip=config.skip), val_x)), axis=0)
+        list(map(preprocess_spec(config), val_x)), axis=0)
     if model.output_shape[-1] != 1: # win2win
         y = np.concatenate(
             list(map(label_to_window(config, skip=config.skip), y)), axis=0)
         val_y = np.concatenate(
-            list(map(label_to_window(config, skip=config.skip), val_y)), axis=0)
+            list(map(label_to_window(config), val_y)), axis=0)
     else: # win2one
         y = np.concatenate(y, axis=0)
         val_y = np.concatenate(val_y, axis=0)
@@ -131,7 +150,7 @@ if __name__ == "__main__":
     """ TRAINING """
     with strategy.scope(): 
         train_dataset = window_dataset_from_list(
-            x, y, config.pad_size, config.step_size, BATCH_SIZE, train=True)
+            x, y, config.pad_size, config.step_size, BATCH_SIZE, train=True, aug=config.aug)
         val_dataset = window_dataset_from_list(
             val_x, val_y, 
             config.pad_size, config.step_size, BATCH_SIZE, train=False)
@@ -158,6 +177,6 @@ if __name__ == "__main__":
         model.fit(train_dataset,
                   epochs=TOTAL_EPOCH,
                   validation_data=val_dataset,
-                  steps_per_epoch=len(x)//BATCH_SIZE,
+                  steps_per_epoch=len(x)//BATCH_SIZE//len(speed),
                   callbacks=callbacks)
 

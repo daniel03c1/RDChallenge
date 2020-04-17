@@ -4,6 +4,7 @@ import numpy as np
 import os
 import pickle
 import shutil
+import time
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -11,6 +12,7 @@ from multiprocessing import Pool
 from tqdm import tqdm
 
 
+# preprocessing labels
 def phn_to_label(phn_filename,
                  padding=0,
                  sync=True):
@@ -46,7 +48,9 @@ def phn_to_label(phn_filename,
         csv.writer(f).writerow(label)
 
 
-def labels_to_pickle(folder, pickle_name):
+def labels_to_pickle(folder, pickle_name=None):
+    if pickle_name is None:
+        pickle_name = folder
     if not pickle_name.endswith('.pickle'):
         pickle_name += '.pickle'
     fnames = sorted(glob.glob(os.path.join(folder, '*.npy')))
@@ -64,13 +68,54 @@ def raw_to_frames(fname):
     return frames
 
 
-def wavs_to_pickle(folder, pickle_name):
+def frames_to_raw(win_size, step_size):
+    def _frames_to_raw(fname):
+        frames = np.load(fname)
+        # raw = np.zeros((len(frames)-1)*step_size + win_size, dtype=np.float32)
+        raw = np.zeros((len(frames))*step_size + win_size, dtype=np.float32)
+        for i in range(len(frames)):
+            raw[step_size*i: step_size*i+win_size] += frames[i]
+        raw = np.greater_equal(raw, win_size/step_size/2)
+        raw = raw.astype(np.float32)
+        return raw
+    return _frames_to_raw
+       
+
+# preprocessing wav files
+def wavs_to_pickle(folder, pickle_name=None, feature_type='mel', n_procs=None):
+    start = time.time()
+    if feature_type == 'spec':
+        transform = wav_to_spec
+    elif feature_type == 'mel':
+        transform = wav_to_mel
+    elif feature_type == 'mfcc':
+        transform = wav_to_mfcc
+    else:
+        raise ValueError(f'invalid feature type :{feature_type}')
+
+    if pickle_name is None:
+        pickle_name = folder
+        if feature_type != 'mel':
+            pickle_name += f'_{feature_type}'
     if not pickle_name.endswith('.pickle'):
         pickle_name += '.pickle'
-    fnames = sorted(glob.glob(os.path.join(folder, '*.wav')))
-    with Pool() as p:
-        npys = p.map(wav_to_mel, tqdm(fnames))
+    fnames = glob.glob(os.path.join(folder, '*.wav'))
+    fnames.sort(key=lambda x: x[:x.rfind('_')])
+    with Pool(n_procs) as p:
+        npys = p.map(transform, tqdm(fnames))
     pickle.dump(npys, open(pickle_name, 'wb'))
+    print(f'took {time.time() - start:.3f} secs')
+
+
+def wav_to_spec(wav_name):
+    wav, _ = torchaudio.load(wav_name)
+    n_fft = 512
+    spec = torchaudio.functional.spectrogram(
+        waveform=wav, pad=0, window=torch.hann_window(n_fft), 
+        n_fft=n_fft, hop_length=n_fft//2, win_length=n_fft, power=2, normalized=False)
+    spec = torch.squeeze(spec)
+    spec = spec[:, 1:].numpy() # remove first frame
+    return spec
 
 
 def wav_to_mel(wav_name):
@@ -81,54 +126,38 @@ def wav_to_mel(wav_name):
     return mel
 
 
-def fit_x_to_y(x_list, y_list):
-    assert len(x_list) == len(y_list)
+def wav_to_mfcc(wav_name):
+    wav, _ = torchaudio.load(wav_name)
+    mfcc = torchaudio.transforms.MFCC(melkwargs={'n_fft':512})(wav)
+    mfcc = torch.squeeze(mfcc)
+    mfcc = mfcc[:, 1:].numpy() # remove first frame
+    return mfcc
 
-    def x_len(index):
-        return x_list[i].shape[1]
-
-    def y_len(index):
-        return y_list[i].shape[0]
-
-    for i in range(len(x_list)):
-        diff = x_len(i) - y_len(i)
-        if diff not in [0, 1]:
-            temp = x_list[i]
-            x_list[i] = x_list[i+1]
-            x_list[i+1] = temp
-
-        if x_len(i) == y_len(i) + 1: 
-            x_list[i] = x_list[i][:, :-1]
-            
 
 if __name__ == '__main__':
     '''
-    PATH = '/home/daniel/TIMIT_extended'
-    for root, dirs, files in os.walk(PATH):
-        for name in files:
-            if name.endswith('.PHN'):
-                phn_to_label(os.path.join(root, name), padding=32000)
-
-    for folder in ['snr-5', 'snr0', 'snr5', 'snr10']:
-        path = '/media/data1/datasets/ai_challenge/' \
-                'TIMIT_NOISEX_extended/TEST/' + folder
-
-        wavs_to_pickle(path, folder)
-
-    path = '/media/data1/datasets/ai_challenge/' \
-           'TIMIT_NOISEX_extended/TEST/label'
-    labels_to_pickle(path, 'label')
+    temp = np.load('temp.npy')
+    print(temp)
+    win_size, step_size = 8, 4
+    frames = frames_to_raw(win_size, step_size)('temp.npy')
+    print(frames)
+    frames = torch.Tensor(frames[None, None, :])
+    frames = F.avg_pool1d(frames, win_size, step_size, ceil_mode=True)
+    frames = torch.squeeze(frames).numpy()
+    frames = np.greater(frames, 0.5).astype(np.float32)
+    print(frames)
     '''
+    import tqdm
     import os
-    import pickle
-    os.chdir('../../')
-    x = pickle.load(open('snr0.pickle', 'rb'))
-    y = pickle.load(open('label.pickle', 'rb'))
+    from multiprocessing import Pool
+    
+    os.chdir('../../rvads')
+    fs = sorted(os.listdir())
+    f2r = frames_to_raw(400, 160)
 
-    fit_x_to_y(x, y)
+    def foo(fname):
+        np.save(fname.replace('rvad', 'rvad-ext'), f2r(fname))
 
-    for i in range(len(x)):
-        if x[i].shape[1] != y[i].shape[0]:
-            print(i, x[i].shape, y[i].shape)
-    print()
+    with Pool() as p:
+        p.map(foo, tqdm.tqdm(fs))
 
