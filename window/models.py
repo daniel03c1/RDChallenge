@@ -32,16 +32,12 @@ def lstm(input_shape, **kwargs):
     model_input = Input(shape=input_shape)
     x = model_input
 
-    for i in range(2):
-        x = LSTM(128, dropout=0.2, return_sequences=True)(x)
+    for i in range(3):
+        x = LSTM(256, return_sequences=True)(x)
 
-    for i in range(2):
-        x = BatchNormalization()(x)
-        x = Dense(512, activation='relu')(x)
-        x = Dropout(0.2)(x)
-    x = Dense(1, activation='sigmoid')(x)
-    x = K.squeeze(x, axis=-1)
-
+    x = Flatten()(x)
+    x = Dropout(0.5)(x)
+    x = Dense(input_shape[0], activation='sigmoid')(x)
     return tf.keras.Model(inputs=model_input, outputs=x)
 
 

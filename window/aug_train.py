@@ -15,43 +15,23 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
 args = argparse.ArgumentParser()
-args.add_argument('--name', type=str, default='model')
+args.add_argument('--name', type=str, default='bdnn')
 args.add_argument('--pad_size', type=int, default=19)
 args.add_argument('--step_size', type=int, default=9)
 args.add_argument('--model', type=str, default='bdnn')
 args.add_argument('--lr', type=float, default=0.1)
-args.add_argument('--gpus', type=str, default='0,1')
+args.add_argument('--gpus', type=str, default='2,3')
 args.add_argument('--skip', type=int, default=2)
 args.add_argument('--noise_aug', action='store_true')
 args.add_argument('--voice_aug', action='store_true')
 args.add_argument('--aug', action='store_true')
 
 
-def mask(spec, max_ratio, axis=0):
-    total = spec.shape[axis]
-    max_mask_size = int(total * max_ratio)
-    mask_shape = tuple(1 if i != axis else -1 
-                       for i in range(len(spec.shape)))
-
-    size = tf.random.uniform([], maxval=max_mask_size, dtype=tf.int32)
-    offset = tf.random.uniform([], maxval=total-size, dtype=tf.int32)
-
-    mask = tf.concat((tf.ones(shape=(offset,)),
-                      tf.zeros(shape=(size,)),
-                      tf.ones(shape=(total-size-offset,))),
-                     0)
-    mask = tf.reshape(mask, mask_shape)
-
-    fill_value = tf.reduce_min(spec)
-    new_spec = spec * mask + fill_value * (1-mask)
-    return new_spec # tf.cast(new_spec, dtype=tf.float32)
-
-
 def window_dataset_from_list(padded_x_list, padded_y_list, 
                              pad_size, step_size, 
                              batch_per_node, train=False, aug=True):
     def augment(x, y):
-        x = mask(x, 0.2, 1)
+        x = mask(x, 0.2, axis=1, method='reduce_min')
         return x, y
 
     dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
@@ -98,14 +78,14 @@ if __name__ == "__main__":
                 open(os.path.join(TRAINPATH, f'snr{snr}_{s}{tail}'), 'rb'))
         
         val_x += pickle.load(
-            open(os.path.join(TESTPATH, f'snr{snr}_test.pickle'), 'rb'))
+            open(os.path.join(TESTPATH, f'snr{snr}.pickle'), 'rb'))
 
     for i in range(len(snrs)):
         for s in speed:
             y += pickle.load(
                 open(os.path.join(TRAINPATH, f'label_{s}.pickle'), 'rb'))
 
-        val_y += pickle.load(open(os.path.join(TESTPATH, 'phn_test.pickle'), 'rb'))
+        val_y += pickle.load(open(os.path.join(TESTPATH, 'phn.pickle'), 'rb'))
 
     # fix mismatch 
     for i in range(len(x)):
@@ -123,7 +103,6 @@ if __name__ == "__main__":
         model.compile(optimizer=SGD(config.lr, momentum=0.9),
                       loss='binary_crossentropy',
                       metrics=['accuracy', 'AUC'])
-        # model.summary()
 
     """ DATA """
     # 2. DATA PRE-PROCESSING

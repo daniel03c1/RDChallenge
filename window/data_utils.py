@@ -48,13 +48,13 @@ def phn_to_label(phn_filename,
         csv.writer(f).writerow(label)
 
 
-def labels_to_pickle(folder, pickle_name=None):
+def labels_to_pickle(folder, pickle_name=None, n_procs=None):
     if pickle_name is None:
         pickle_name = folder
     if not pickle_name.endswith('.pickle'):
         pickle_name += '.pickle'
     fnames = sorted(glob.glob(os.path.join(folder, '*.npy')))
-    with Pool() as p:
+    with Pool(n_procs) as p:
         npys = p.map(raw_to_frames, tqdm(fnames))
     pickle.dump(npys, open(pickle_name, 'wb'))
 

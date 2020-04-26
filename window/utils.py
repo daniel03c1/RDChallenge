@@ -69,14 +69,18 @@ def preprocess_spec(config, feature='mel', skip=1):
         raise ValueError(f'invalid feature - {feature}')
 
     def _preprocess_spec(spec):
+        const_value = EPSILON
         if feature in ['spec', 'mel']:
             spec = np.log(spec + EPSILON)
-        if feature == 'mel':
-            spec = (spec - 4.5252) / 2.6146 # normalize
+            const_value = LOG_EPSILON
+
         spec = spec.transpose(1, 0) # to (time, freq)
+
         windows = sequence_to_windows(spec, 
                                       config.pad_size, config.step_size,
-                                      skip, True, LOG_EPSILON)
+                                      skip, True, const_value)
+        if feature == 'mel':
+            windows = (windows + 1.3856256) / 5.0747867 # normalize
         return windows
     return _preprocess_spec
 
@@ -88,4 +92,24 @@ def label_to_window(config, skip=1):
             label, config.pad_size, config.step_size, skip, True)
         return label
     return _preprocess_label
+
+
+# TODO (test is required)
+def mask(spec, max_ratio, axis=0, method='reduce_mean'):
+    total = spec.shape[axis]
+    max_mask_size = int(total * max_ratio)
+    mask_shape = tuple(1 if i != axis else -1 
+                       for i in range(len(spec.shape)))
+
+    size = tf.random.uniform([], maxval=max_mask_size, dtype=tf.int32)
+    offset = tf.random.uniform([], maxval=total-size, dtype=tf.int32)
+
+    mask = tf.concat((tf.ones(shape=(offset,)),
+                      tf.zeros(shape=(size,)),
+                      tf.ones(shape=(total-size-offset,))),
+                     0)
+    mask = tf.reshape(mask, mask_shape)
+
+    fill_value = getattr(tf, method)(spec)
+    return spec * mask + fill_value * (1-mask)
 

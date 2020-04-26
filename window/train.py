@@ -15,46 +15,30 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
 args = argparse.ArgumentParser()
-args.add_argument('--name', type=str, default='model')
+args.add_argument('--name', type=str, default='bdnn_baseline')
 args.add_argument('--pad_size', type=int, default=19)
 args.add_argument('--step_size', type=int, default=9)
-args.add_argument('--model', type=str, default='test2')
+args.add_argument('--model', type=str, default='bdnn')
 args.add_argument('--lr', type=float, default=0.1)
-args.add_argument('--gpus', type=str, default='0,1')
-args.add_argument('--skip', type=int, default=3)
-
-
-def mask(spec, max_ratio, axis=0, fill_value=0):
-    total = spec.shape[axis]
-    max_mask_size = int(total * max_ratio)
-    mask_shape = tuple(1 if i != axis else -1 
-                       for i in range(len(spec.shape)))
-
-    size = tf.random.uniform([], maxval=max_mask_size, dtype=tf.int32)
-    offset = tf.random.uniform([], maxval=total-size, dtype=tf.int32)
-
-    mask = tf.concat((tf.ones(shape=(offset,)),
-                      tf.zeros(shape=(size,)),
-                      tf.ones(shape=(total-size-offset,))),
-                     0)
-    mask = tf.reshape(mask, mask_shape)
-
-    fill_value = tf.reduce_min(spec) # TEST
-    spec = spec * mask + fill_value * (1-mask)
-    return tf.cast(spec, dtype=tf.float32)
+args.add_argument('--gpus', type=str, default='2,3')
+args.add_argument('--skip', type=int, default=2)
+args.add_argument('--aug', type=str, default='reduce_min')
 
 
 def window_dataset_from_list(padded_x_list, padded_y_list, 
                              pad_size, step_size, 
-                             batch_per_node, train=False):
+                             batch_per_node, 
+                             train=False, 
+                             aug='reduce_min'):
     def augment(x, y):
-        x = mask(x, 0.2, 1, fill_value=(LOG_EPSILON-4.5252)/2.6146)
+        x = mask(x, 0.2, axis=1, method=aug) # freq masking
         return x, y
 
     dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
     if train:
-        dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
-        dataset = dataset.repeat().shuffle(buffer_size=1000000) # len(padded_x_list))
+        if aug:
+            dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
+        dataset = dataset.repeat().shuffle(buffer_size=1000000) 
     return dataset.batch(batch_per_node, drop_remainder=True).prefetch(AUTOTUNE)
 
 
@@ -77,26 +61,37 @@ if __name__ == "__main__":
     PATH = '/datasets/ai_challenge/' # inside a docker container
     if not os.path.isdir(PATH): # outside... 
         PATH = '/media/data1/datasets/ai_challenge/'
-    PATH = os.path.join(PATH, 'TIMIT_NOISEX_extended/')
-
-    TRAINPATH = os.path.join(PATH, 'TRAIN')
-    TESTPATH = os.path.join(PATH, 'TEST')
+    PATH = os.path.join(PATH, 'TIMIT_noisex_norm')
 
     x, val_x = [], []
     y, val_y = [], []
 
-    for snr in ['-20', '-15', '-5', '0', '5', '10']:
-        x += pickle.load(open(os.path.join(TRAINPATH, f'snr{snr}.pickle'), 'rb'))
-        val_x += pickle.load(open(os.path.join(TESTPATH, f'snr{snr}_test.pickle'), 'rb'))
+    # 1.1 training set
+    for snr in ['-15', '-5', '5', '15']:
+        x += pickle.load(
+            open(os.path.join(PATH, 
+                              f'train/snr{snr}_10_no_noise_aug.pickle'),
+                 'rb'))
+        y += pickle.load(
+            open(os.path.join(PATH, f'train/label_10.pickle'), 'rb'))
 
-    for i in range(6):
-        y += pickle.load(open(os.path.join(TRAINPATH, 'phn.pickle'), 'rb'))
-        val_y += pickle.load(open(os.path.join(TESTPATH, 'phn_test.pickle'), 'rb'))
+    # 1.2 validation set
+    for snr in ['-20', '-10', '0', '10', '20']:
+        val_x += pickle.load(
+            open(os.path.join(PATH, f'test/snr{snr}.pickle'), 'rb'))
+
+        val_y += pickle.load(open(os.path.join(PATH, 'test/phn.pickle'), 'rb'))
+
+    # 1.3 fix mismatch 
+    for i in range(len(x)):
+        x[i] = x[i][:, :len(y[i])]
 
     """ MODEL """
+    # 2. model definition
     with strategy.scope(): 
         time, freq = WINDOW_SIZE, x[0].shape[0]
 
+        print(config.model)
         model = getattr(models, config.model)(
             input_shape=(WINDOW_SIZE, freq),
             kernel_regularizer=tf.keras.regularizers.l2(1e-5))
@@ -104,25 +99,26 @@ if __name__ == "__main__":
         model.compile(optimizer=SGD(config.lr, momentum=0.9),
                       loss='binary_crossentropy',
                       metrics=['accuracy', 'AUC'])
-        model.summary()
 
     """ DATA """
-    # 2. DATA PRE-PROCESSING
+    # 3. DATA PRE-PROCESSING
     x = np.concatenate(
         list(map(preprocess_spec(config, skip=config.skip), x)), axis=0)
     val_x = np.concatenate(
-        list(map(preprocess_spec(config, skip=config.skip), val_x)), axis=0)
+        list(map(preprocess_spec(config), val_x)), axis=0)
+
+    # 3.1 sequence to window
     if model.output_shape[-1] != 1: # win2win
         y = np.concatenate(
             list(map(label_to_window(config, skip=config.skip), y)), axis=0)
         val_y = np.concatenate(
-            list(map(label_to_window(config, skip=config.skip), val_y)), axis=0)
+            list(map(label_to_window(config), val_y)), axis=0)
     else: # win2one
         y = np.concatenate(y, axis=0)
         val_y = np.concatenate(val_y, axis=0)
     print("data pre-processing finished")
 
-    # 2.1. SHUFFLING TRAINING DATA
+    # 3.2 shuffling
     perm = np.random.permutation(len(x))
     x = np.take(x, perm, axis=0)
     y = np.take(y, perm, axis=0)
@@ -130,13 +126,17 @@ if __name__ == "__main__":
 
     """ TRAINING """
     with strategy.scope(): 
+        # 4. train starts
         train_dataset = window_dataset_from_list(
-            x, y, config.pad_size, config.step_size, BATCH_SIZE, train=True)
+            x, y, config.pad_size, config.step_size, BATCH_SIZE, 
+            train=True, aug=config.aug)
         val_dataset = window_dataset_from_list(
-            val_x, val_y, 
-            config.pad_size, config.step_size, BATCH_SIZE, train=False)
+            val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
+            train=False)
 
         callbacks = [
+            CSVLogger(config.name + '.log',
+                      append=True),
             ReduceLROnPlateau(monitor='val_AUC',
                               factor=0.9,
                               patience=1,
@@ -145,9 +145,7 @@ if __name__ == "__main__":
                               min_lr=1e-5),
             EarlyStopping(monitor='val_AUC',
                           mode='max',
-                          patience=5),
-            CSVLogger(config.name + '.log',
-                      append=True),
+                          patience=3),
             ModelCheckpoint(config.name+'.h5',
                             monitor='val_AUC',
                             mode='max',
@@ -160,4 +158,14 @@ if __name__ == "__main__":
                   validation_data=val_dataset,
                   steps_per_epoch=len(x)//BATCH_SIZE,
                   callbacks=callbacks)
+
+        # 4.1 calibrate BN
+        model.compile(optimizer=SGD(0),
+                      loss='binary_crossentropy',
+                      metrics=['accuracy', 'AUC'])
+
+        model.fit(x, y, epochs=1,
+                  batch_size=BATCH_SIZE,
+                  validation_data=(val_x, val_y),
+                  callbacks=callbacks[0:1])
 

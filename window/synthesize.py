@@ -9,17 +9,21 @@ def raw2wav(raw, wav=None, sr=16000, bit=16, channel=1):
     if wav is None:
         wav = raw.replace('.raw', '.wav')
     os.system(f'sox -r {sr} -e signed-integer -c {channel} '
-              f'-b {bit} --endian little {raw} {wav}')
+              f'-b {bit} {raw} {wav}')
 
 
-def wav2raw(wav, raw, sr=16000, bits=16, channel=1):
+def wav2raw(wav, raw=None, sr=16000, bit=16, channel=1):
+    assert wav.endswith('.wav')
+    if raw is None:
+        raw = wav.replace('.wav', '.raw')
     os.system(f'sox -r {sr} -e signed-integer -c {channel} '
               f'-b {bit} --endian little {wav} {raw}')
 
 
 def generate_fant(in_list, out_list, noise, 
-                  snr, filter_mode='p341'):
-    os.system(f'{FANT_DIR} -u -i {in_list} -o {out_list} '
+                  snr, filter_mode='p341', norm=True):
+    norm = '-l -20 ' if norm else ''
+    os.system(f'{FANT_DIR} -u {norm}-i {in_list} -o {out_list} '
               f'-n {noise} -f {filter_mode} -s {snr}')
 
 
@@ -27,7 +31,7 @@ def extract_name(path):
     return os.path.splitext(os.path.basename(path))[0]
 
 
-def synthesize(clean_raws, noise, snr, sr=16000):
+def synthesize(clean_raws, noise, snr, norm=True):
     _noise = extract_name(noise)
     in_list = f'{_noise}_{snr}_in.list'
     out_list = f'{_noise}_{snr}_out.list'
@@ -39,7 +43,7 @@ def synthesize(clean_raws, noise, snr, sr=16000):
         o.write('\n'.join(
             map(lambda x: f'{extract_name(x)}_{_noise}.raw', clean_raws)).encode())
     
-    generate_fant(in_list, out_list, noise, snr)
+    generate_fant(in_list, out_list, noise, snr, 'p341', norm)
 
     os.remove(in_list)
     os.remove(out_list)
@@ -55,12 +59,13 @@ if __name__ == "__main__":
     from multiprocessing import Pool
     from tqdm import tqdm
 
-    SNRS = [15]
-    SPEEDS = ['09', '10', '11']
-    NOISE_AUG = [True, False]
+    SNRS = [-10, 0, 10] # -15, -5, 5, 15]
+    SPEEDS = ['10'] # '09', '10', '11']
+    NOISE_AUG = [True] # True, False]
 
-    NOISES = glob(os.path.join('/codes/noisex/train', '*.raw'))
-    AUDIO_PATH = '/datasets/ai_challenge/TIMIT_extended_speed'
+    # NOISES = glob(os.path.join('/codes/noisex/train', '*.raw'))
+    NOISES = glob(os.path.join('/codes/aurora2', '*.raw'))
+    AUDIO_PATH = '/datasets/ai_challenge/LibriSpeech'
 
     os.chdir('/codes')
 
@@ -70,7 +75,7 @@ if __name__ == "__main__":
             noises = NOISES
             tail = ''
         if not noise_aug:
-            noises = [noise for noise in noises 
+            noises = [noise for noise in NOISES 
                       if noise.endswith('0.raw')]
             tail = '_no_noise_aug'
         n_noises = len(noises)
@@ -79,7 +84,8 @@ if __name__ == "__main__":
             # Select Audios
             CLEAN_PATH = os.path.join(
                 AUDIO_PATH,
-                f'train_raw_{speed}')
+                # f'train_raw_{speed}')
+                'train-clean-100-raw')
             clean = glob(os.path.join(CLEAN_PATH, '*.raw'))
             clean = np.array(clean)
 
@@ -89,7 +95,7 @@ if __name__ == "__main__":
                 clean_alloc = [clean[np.where(alloc == i)[0]]
                                for i in range(n_noises)]
 
-                with Pool() as p:
+                with Pool(10) as p:
                     p.map(synth2, 
                           list(zip(clean_alloc, noises, np.repeat(snr, n_noises))))
                     p.map(raw2wav, tqdm(glob('*.raw')))
@@ -98,4 +104,3 @@ if __name__ == "__main__":
                 os.mkdir(folder)
                 os.system(f'mv *.wav {folder}')
                 os.system('rm *.raw')
-
