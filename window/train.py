@@ -3,6 +3,7 @@ import numpy as np
 import os
 import tensorflow as tf
 import pickle
+from functools import partial
 from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.optimizers import *
@@ -22,24 +23,39 @@ args.add_argument('--model', type=str, default='bdnn')
 args.add_argument('--lr', type=float, default=0.1)
 args.add_argument('--gpus', type=str, default='2,3')
 args.add_argument('--skip', type=int, default=2)
-args.add_argument('--aug', type=str, default='reduce_min')
+args.add_argument('--aug', type=str, default='min')
 
 
 def window_dataset_from_list(padded_x_list, padded_y_list, 
                              pad_size, step_size, 
                              batch_per_node, 
                              train=False, 
-                             aug='reduce_min'):
+                             cval=0.):
     def augment(x, y):
-        x = mask(x, 0.2, axis=1, method=aug) # freq masking
+        x = mask(x, 0.2, axis=1, cval=cval) # freq masking
         return x, y
 
     dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
     if train:
-        if aug:
-            dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
+        dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
         dataset = dataset.repeat().shuffle(buffer_size=1000000) 
     return dataset.batch(batch_per_node, drop_remainder=True).prefetch(AUTOTUNE)
+
+
+def from_list_to_cutmixed_window(padded_x_list, padded_y_list, 
+                                 pad_size, step_size, 
+                                 batch_per_node, 
+                                 train=False):
+    dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
+    if train:
+        dataset = dataset.repeat().shuffle(buffer_size=1000000) 
+        dataset = dataset.batch(batch_per_node)
+        dataset = dataset.map(partial(cutmix, batch_size=batch_per_node),
+                              num_parallel_calls=AUTOTUNE)
+        dataset = dataset.prefetch(AUTOTUNE)
+    else:
+        dataset = dataset.batch(batch_per_node, drop_remainder=False)
+    return dataset
 
 
 if __name__ == "__main__":
@@ -124,13 +140,25 @@ if __name__ == "__main__":
     y = np.take(y, perm, axis=0)
     print("shuffling training data finished")
 
+    # 3.3 CVAL
+    cval = getattr(x, config.aug)()
+    print(f'CVAL: {cval}')
+
     """ TRAINING """
     with strategy.scope(): 
         # 4. train starts
+        '''
         train_dataset = window_dataset_from_list(
             x, y, config.pad_size, config.step_size, BATCH_SIZE, 
-            train=True, aug=config.aug)
+            train=True, cval=cval) 
         val_dataset = window_dataset_from_list(
+            val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
+            train=False)
+        '''
+        train_dataset = from_list_to_cutmixed_window(
+            x, y, config.pad_size, config.step_size, BATCH_SIZE, 
+            train=True)
+        val_dataset = from_list_to_cutmixed_window(
             val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
             train=False)
 

@@ -95,7 +95,7 @@ def label_to_window(config, skip=1):
 
 
 # TODO (test is required)
-def mask(spec, max_ratio, axis=0, method='reduce_mean'):
+def mask(spec, max_ratio, axis=0, cval=0.):
     total = spec.shape[axis]
     max_mask_size = int(total * max_ratio)
     mask_shape = tuple(1 if i != axis else -1 
@@ -110,6 +110,28 @@ def mask(spec, max_ratio, axis=0, method='reduce_mean'):
                      0)
     mask = tf.reshape(mask, mask_shape)
 
-    fill_value = getattr(tf, method)(spec)
-    return spec * mask + fill_value * (1-mask)
+    return spec * mask + cval * (1-mask)
 
+
+def cutmix(x, y, axis=2, batch_size=4096):
+    # x.shape = [batch, time, freq]
+    total = x.shape[axis]
+    mask_shape = tuple(1 if i != axis else -1 
+                       for i in range(len(x.shape)))
+
+    size = tf.random.uniform([], maxval=total, dtype=tf.int32)
+    offset = tf.random.uniform([], maxval=total-size, dtype=tf.int32)
+
+    mask = tf.concat((tf.ones(shape=(offset,)),
+                      tf.zeros(shape=(size,)),
+                      tf.ones(shape=(total-size-offset,))),
+                     0)
+    mask = tf.reshape(mask, mask_shape)
+
+    lmbda = tf.cast(size / total, dtype=tf.float32)
+
+    indices = tf.random.shuffle(tf.range(batch_size))
+    x = x * mask + tf.gather(x, indices, axis=0) * (1-mask)
+    y = y * (1-lmbda) + tf.gather(y, indices, axis=0) * lmbda
+
+    return x, y
