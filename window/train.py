@@ -32,14 +32,18 @@ def window_dataset_from_list(padded_x_list, padded_y_list,
                              train=False, 
                              cval=0.):
     def augment(x, y):
-        x = mask(x, 0.2, axis=1, cval=cval) # freq masking
+        x = mask(x, 0.2, axis=2, cval=cval) # freq masking in batch mode
         return x, y
 
     dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
     if train:
-        dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
         dataset = dataset.repeat().shuffle(buffer_size=1000000) 
-    return dataset.batch(batch_per_node, drop_remainder=True).prefetch(AUTOTUNE)
+        dataset = dataset.batch(batch_per_node)
+        dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
+        dataset = dataset.prefetch(AUTOTUNE)
+    else:
+        dataset = dataset.batch(batch_per_node, drop_remainder=False)
+    return dataset
 
 
 def from_list_to_cutmixed_window(padded_x_list, padded_y_list, 
@@ -147,7 +151,6 @@ if __name__ == "__main__":
     """ TRAINING """
     with strategy.scope(): 
         # 4. train starts
-        '''
         train_dataset = window_dataset_from_list(
             x, y, config.pad_size, config.step_size, BATCH_SIZE, 
             train=True, cval=cval) 
@@ -161,6 +164,7 @@ if __name__ == "__main__":
         val_dataset = from_list_to_cutmixed_window(
             val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
             train=False)
+        '''
 
         callbacks = [
             CSVLogger(config.name + '.log',
