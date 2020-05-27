@@ -17,7 +17,6 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 args = argparse.ArgumentParser()
 args.add_argument('--name', type=str, default='bdnn')
-args.add_argument('--pretrain', type=str, default='')
 args.add_argument('--pad_size', type=int, default=19)
 args.add_argument('--step_size', type=int, default=9)
 args.add_argument('--model', type=str, default='bdnn')
@@ -34,35 +33,17 @@ def window_dataset_from_list(padded_x_list, padded_y_list,
                              cval=0.):
     dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
     
+    # if train:
+    dataset = dataset.repeat()
     if train:
-        dataset = dataset.repeat().shuffle(buffer_size=1000000) 
-        dataset = dataset.batch(batch_per_node)
-        # dataset = dataset.map(partial(add_noise, stddev=0.1),
-        #                       num_parallel_calls=AUTOTUNE)
-        dataset = dataset.map(partial(mask, max_ratio=0.2, axis=1, cval=cval),
-                              num_parallel_calls=AUTOTUNE)
-        dataset = dataset.prefetch(AUTOTUNE)
-    else:
-        dataset = dataset.batch(batch_per_node, drop_remainder=False)
-    return dataset
-
-
-def from_list_to_cutmixed_window(padded_x_list, padded_y_list, 
-                                 pad_size, step_size, 
-                                 batch_per_node, 
-                                 train=False):
-    def augment(x, y):
-        return cutmix(x, y, axis=1, batch_size=batch_per_node)
-
-    dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
-    if train:
-        dataset = dataset.repeat().shuffle(buffer_size=1000000) 
-        dataset = dataset.batch(batch_per_node)
-        dataset = dataset.map(partial(cutmix, axis=2, batch_size=batch_per_node),
-                              num_parallel_calls=AUTOTUNE)
-        dataset = dataset.prefetch(AUTOTUNE)
-    else:
-        dataset = dataset.batch(batch_per_node, drop_remainder=False)
+        dataset = dataset.shuffle(buffer_size=1000000) 
+    dataset = dataset.batch(batch_per_node)
+    ratio = 0.4 * train
+    dataset = dataset.map(partial(mask2, max_ratio=ratio, axis=2, cval=cval),
+                          num_parallel_calls=AUTOTUNE)
+    dataset = dataset.prefetch(AUTOTUNE)
+    # else:
+    #     dataset = dataset.batch(batch_per_node, drop_remainder=False)
     return dataset
 
 
@@ -118,18 +99,23 @@ if __name__ == "__main__":
         time, freq = WINDOW_SIZE, x[0].shape[0]
         input_shape = (WINDOW_SIZE, freq)
 
-        print(config.model)
-        if config.pretrain != '':
-            model = tf.keras.models.load_model(config.pretrain, compile=False)
-        else:
-            model = getattr(models, config.model)(
-                input_shape=input_shape,
-                kernel_regularizer=tf.keras.regularizers.l2(1e-5))
-        model.summary()
+        kernel_regularizer = tf.keras.regularizers.l2(1e-5)
 
+        input_layer = tf.keras.layers.Input(shape=input_shape)
+        gen = models.test(input_shape, activation=None, 
+                          kernel_regularizer=kernel_regularizer)
+        gen_ = gen(input_layer)
+
+        dsc = models.test(input_shape, kernel_regularizer=kernel_regularizer)
+        dsc_ = dsc(gen_)
+
+        model = tf.keras.Model(inputs=input_layer, outputs=[gen_, dsc_])
+
+        model.summary()
         model.compile(optimizer=SGD(config.lr, momentum=0.9),
-                      loss='binary_crossentropy',
-                      metrics=['accuracy', 'AUC'])
+                      loss=['MSE', 'binary_crossentropy'],
+                      loss_weights=[1, 1],
+                      metrics=[[], ['accuracy', 'AUC']])
 
     """ DATA """
     # 3. DATA PRE-PROCESSING
@@ -168,30 +154,22 @@ if __name__ == "__main__":
         val_dataset = window_dataset_from_list(
             val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
             train=False)
-        '''
-        train_dataset = from_list_to_cutmixed_window(
-            x, y, config.pad_size, config.step_size, BATCH_SIZE, 
-            train=True)
-        val_dataset = from_list_to_cutmixed_window(
-            val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
-            train=False)
-        '''
 
         callbacks = [
             CSVLogger(config.name + '.log',
                       append=True),
-            ReduceLROnPlateau(monitor='val_AUC',
+            ReduceLROnPlateau(monitor='val_loss', # 'val_AUC',
                               factor=0.9,
-                              patience=1,
-                              mode='max',
+                              patience=3,
+                              mode='auto', # 'max',
                               verbose=1,
                               min_lr=1e-5),
-            EarlyStopping(monitor='val_AUC',
-                          mode='max',
-                          patience=3),
+            EarlyStopping(monitor='val_loss', # 'val_AUC',
+                          mode='auto', # 'max',
+                          patience=10),
             ModelCheckpoint(config.name+'.h5',
-                            monitor='val_AUC',
-                            mode='max',
+                            monitor='val_loss', # 'val_AUC',
+                            mode='auto', # 'max',
                             save_best_only=True),
             TerminateOnNaN(),
         ]
@@ -199,22 +177,7 @@ if __name__ == "__main__":
         model.fit(train_dataset,
                   epochs=TOTAL_EPOCH,
                   validation_data=val_dataset,
-                  # batch_size=BATCH_SIZE,
                   steps_per_epoch=len(x)//BATCH_SIZE,
+                  validation_steps=len(val_x)//BATCH_SIZE,
                   callbacks=callbacks)
-
-        '''
-        # 4.1 calibrate BN
-        model.load_weights(config.name+'.h5')
-
-        model.compile(optimizer=SGD(0),
-                      loss='binary_crossentropy',
-                      metrics=['accuracy', 'AUC'])
-
-        model.fit(x[:len(x)//4], y[:len(x)//4], epochs=1,
-                  batch_size=BATCH_SIZE,
-                  validation_data=(val_x, val_y),
-                  shuffle=True,
-                  callbacks=callbacks[0:1])
-        '''
 

@@ -54,6 +54,7 @@ def synth2(clean_noise_snr):
 
 
 if __name__ == "__main__":
+    '''
     import numpy as np
     from glob import glob
     from multiprocessing import Pool
@@ -104,3 +105,25 @@ if __name__ == "__main__":
                 os.mkdir(folder)
                 os.system(f'mv *.wav {folder}')
                 os.system('rm *.raw')
+    '''
+    '''
+    os.system(f'sox -r 48k -e signed-integer -c 2 '
+              f'-b 16 --endian little audio_000001.wav test.raw rate 16k')
+    raw2wav('test.raw', channel=2)
+    '''
+
+    os.chdir('/datasets/ai_challenge/interspeech20/train/_output_wavs_clean')
+    '''
+    for i in range(100):
+        os.system(f'sox -r 48k -e signed-integer -c 2 -b 16 --endian little '
+                  f'noise_{i+4901:06d}.wav noise_{i+4901:06d}.raw rate 16k')
+    
+    '''
+    print()
+    for i in range(100):
+        synthesize([f'clean_{i+4901:06d}.raw'], 
+                   f'../_output_wavs_noise/noise_{i+4901:06d}.raw', 
+                   0, norm=False)
+        print(f'{i+1}\r', end='')
+    print()
+

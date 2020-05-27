@@ -100,7 +100,7 @@ def wavs_to_pickle(folder, pickle_name=None, feature_type='mel', n_procs=None):
     if not pickle_name.endswith('.pickle'):
         pickle_name += '.pickle'
     fnames = glob.glob(os.path.join(folder, '*.wav'))
-    fnames.sort(key=lambda x: x[:x.rfind('_')])
+    fnames.sort(key=lambda x: x[:x.rfind('_')]) # noisy data has noise id at the end
     with Pool(n_procs) as p:
         npys = p.map(transform, tqdm(fnames))
     pickle.dump(npys, open(pickle_name, 'wb'))
@@ -146,7 +146,7 @@ if __name__ == '__main__':
     frames = torch.squeeze(frames).numpy()
     frames = np.greater(frames, 0.5).astype(np.float32)
     print(frames)
-    '''
+
     import tqdm
     import os
     from multiprocessing import Pool
@@ -161,3 +161,7 @@ if __name__ == '__main__':
     with Pool() as p:
         p.map(foo, tqdm.tqdm(fs))
 
+    '''
+    wavs_to_pickle(
+        '/media/data1/datasets/ai_challenge/TIMIT_extended/train_wav_10',
+        n_procs=10)

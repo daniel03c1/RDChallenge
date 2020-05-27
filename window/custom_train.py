@@ -37,29 +37,6 @@ def window_dataset_from_list(padded_x_list, padded_y_list,
     if train:
         dataset = dataset.repeat().shuffle(buffer_size=1000000) 
         dataset = dataset.batch(batch_per_node)
-        # dataset = dataset.map(partial(add_noise, stddev=0.1),
-        #                       num_parallel_calls=AUTOTUNE)
-        dataset = dataset.map(partial(mask, max_ratio=0.2, axis=1, cval=cval),
-                              num_parallel_calls=AUTOTUNE)
-        dataset = dataset.prefetch(AUTOTUNE)
-    else:
-        dataset = dataset.batch(batch_per_node, drop_remainder=False)
-    return dataset
-
-
-def from_list_to_cutmixed_window(padded_x_list, padded_y_list, 
-                                 pad_size, step_size, 
-                                 batch_per_node, 
-                                 train=False):
-    def augment(x, y):
-        return cutmix(x, y, axis=1, batch_size=batch_per_node)
-
-    dataset = tf.data.Dataset.from_tensor_slices((padded_x_list, padded_y_list))
-    if train:
-        dataset = dataset.repeat().shuffle(buffer_size=1000000) 
-        dataset = dataset.batch(batch_per_node)
-        dataset = dataset.map(partial(cutmix, axis=2, batch_size=batch_per_node),
-                              num_parallel_calls=AUTOTUNE)
         dataset = dataset.prefetch(AUTOTUNE)
     else:
         dataset = dataset.batch(batch_per_node, drop_remainder=False)
@@ -168,14 +145,6 @@ if __name__ == "__main__":
         val_dataset = window_dataset_from_list(
             val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
             train=False)
-        '''
-        train_dataset = from_list_to_cutmixed_window(
-            x, y, config.pad_size, config.step_size, BATCH_SIZE, 
-            train=True)
-        val_dataset = from_list_to_cutmixed_window(
-            val_x, val_y, config.pad_size, config.step_size, BATCH_SIZE,
-            train=False)
-        '''
 
         callbacks = [
             CSVLogger(config.name + '.log',
@@ -196,25 +165,9 @@ if __name__ == "__main__":
             TerminateOnNaN(),
         ]
 
-        model.fit(train_dataset,
+        model.fit(x, y, # train_dataset,
                   epochs=TOTAL_EPOCH,
                   validation_data=val_dataset,
-                  # batch_size=BATCH_SIZE,
-                  steps_per_epoch=len(x)//BATCH_SIZE,
-                  callbacks=callbacks)
-
-        '''
-        # 4.1 calibrate BN
-        model.load_weights(config.name+'.h5')
-
-        model.compile(optimizer=SGD(0),
-                      loss='binary_crossentropy',
-                      metrics=['accuracy', 'AUC'])
-
-        model.fit(x[:len(x)//4], y[:len(x)//4], epochs=1,
                   batch_size=BATCH_SIZE,
-                  validation_data=(val_x, val_y),
-                  shuffle=True,
-                  callbacks=callbacks[0:1])
-        '''
-
+                  # steps_per_epoch=len(x)//BATCH_SIZE,
+                  callbacks=callbacks)

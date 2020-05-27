@@ -1,7 +1,8 @@
 import tensorflow as tf
 import numpy as np
 from tensorflow.keras.layers import *
-import keras.backend as K
+from tensorflow.keras.initializers import *
+import tensorflow.keras.backend as K
 
 
 def dnn(input_shape, dropout_rate=0.5, **kwargs):
@@ -16,7 +17,7 @@ def dnn(input_shape, dropout_rate=0.5, **kwargs):
     return tf.keras.Model(inputs=model_input, outputs=x)
 
 
-def bdnn(input_shape, dropout_rate=0.5, **kwargs):
+def bdnn(input_shape, dropout_rate=0.5, activation='sigmoid', **kwargs):
     model_input = Input(shape=input_shape)
 
     x = Flatten()(model_input)
@@ -24,7 +25,10 @@ def bdnn(input_shape, dropout_rate=0.5, **kwargs):
         x = BatchNormalization()(x)
         x = Dense(512, activation='relu')(x)
         x = Dropout(dropout_rate)(x)
-    x = Dense(input_shape[0], activation='sigmoid')(x)
+    # x = Dense(input_shape[0], activation=activation)(x)
+    x = Dense(input_shape[0]*input_shape[1], activation=activation)(x)
+    x = Reshape(input_shape)(x)
+    x = K.mean(x, axis=2)
     return tf.keras.Model(inputs=model_input, outputs=x)
 
 
@@ -231,3 +235,118 @@ def test2(input_shape, **kwargs):
 
     return tf.keras.Model(inputs=model_input, outputs=x)
 
+
+class Mask(tf.keras.layers.Layer):
+    def __init__(self, 
+                 min_value=0., 
+                 max_value=1.,
+                 freq_axis=1,
+                 **kwargs):
+        super(Mask, self).__init__(**kwargs)
+        self.min_value = min_value
+        self.max_value = max_value
+        self.freq_axis = freq_axis
+
+    def build(self, input_shape):
+        self.ratio = self.add_weight(shape=[],
+                                     name='ratio',
+                                     initializer=GlorotNormal(),
+                                     regularizer=None,
+                                     constraint=None,
+                                     trainable=True)
+        self.beta = self.add_weight(shape=[],
+                                    name='beta',
+                                    initializer=GlorotNormal(),
+                                    regularizer=None,
+                                    constraint=None)
+        self.built = True
+
+    def call(self, inputs, training=None):
+        input_shape = K.int_shape(inputs)
+        freq = input_shape[self.freq_axis]
+
+        broadcast_shape = [1] * len(input_shape)
+        broadcast_shape[self.freq_axis] = freq
+
+        def masked():
+            # pick cval
+            beta = K.sigmoid(self.beta)
+            cval = self.min_value * beta + self.max_value * (1-beta)
+
+            # determine a mask
+            ratio = K.sigmoid(self.ratio)
+
+            size = K.random_uniform([], maxval=0.2, dtype='float32')
+            offset = K.random_uniform([], maxval=1-size, dtype='float32')
+
+            '''
+            ratio = K.concatenate([self.ratio, [0.]])
+            ratio = ratio + K.random_normal([3,], dtype='float32')
+            ratio = K.softmax(ratio)
+            '''
+            mask = K.arange(0., 1., 1/freq, dtype='float32')
+            ge = K.cast(K.greater_equal(mask, offset), dtype='float32')
+            le = K.cast(K.less_equal(mask, size+offset), dtype='float32')
+
+            mask = 1 - ge * le
+            mask = K.reshape(mask, broadcast_shape)
+
+            outputs = inputs * mask + cval * (1-mask)
+
+            return outputs
+
+        return K.in_train_phase(masked, inputs, training=training)
+
+    def get_config(self):
+        config = {
+            'min_value': self.min_value,
+            'max_value': self.max_value,
+            'freq_axis': self.freq_axis
+        }
+        base_config = super(Mask, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+
+class MaskManager(tf.keras.callbacks.Callback):
+    def __init__(self, index, **kwargs):
+        super(MaskManager, self).__init__(**kwargs)
+        self.index = index
+
+        self.last_auc = 0.
+
+    def on_epoch_end(self, epoch, logs=None):
+        auc = logs.get('val_AUC')
+        mask = self.model.layers[self.index]
+        offset = 0.1 - (auc < self.last_auc)*0.2
+        new_alpha = K.get_value(mask.alpha) + offset
+        K.update_value(mask.alpha, K.clip(new_alpha, 0., 1.))
+        self.last_auc = auc
+
+
+def test(input_shape, dropout_rate=0.5, activation='sigmoid', **kwargs):
+    model_input = Input(shape=input_shape)
+
+    x = Flatten()(model_input)
+    for i in range(2):
+        x = BatchNormalization()(x)
+        x = Dense(512, activation='relu')(x)
+        x = Dropout(dropout_rate)(x)
+    x = Dense(input_shape[0]*input_shape[1], activation=activation)(x)
+    x = Reshape(input_shape)(x)
+    return tf.keras.Model(inputs=model_input, outputs=x)
+
+
+def bdnn_test(input_shape, dropout_rate=0.5, activation='sigmoid', **kwargs):
+    model_input = Input(shape=input_shape)
+
+    x = BatchNormalization()(model_input)
+    x = Flatten()(x)
+    for i in range(2):
+        x = BatchNormalization()(x)
+        x = Dense(512, activation='relu')(x)
+        x = Dropout(dropout_rate)(x)
+    x = Dense(input_shape[0], activation=activation)(x)
+    return tf.keras.Model(inputs=model_input, outputs=x)
