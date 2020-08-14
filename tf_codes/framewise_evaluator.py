@@ -5,6 +5,7 @@ import tensorflow as tf
 from sklearn.metrics import confusion_matrix
 from tensorflow.keras.metrics import *
 from utils import *
+from transforms import log_magphase
 
 from efficientnet.model import EfficientNetB0
 
@@ -15,10 +16,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
 args = argparse.ArgumentParser()
 args.add_argument('--saved_model', type=str, required=True)
-args.add_argument('--norm', type=bool, default=False)
-args.add_argument('--verbose', type=bool, default=False)
-args.add_argument('--task', type=str, default='vad',
-                  choices=('vad', 'both'))
+args.add_argument('--window_size', type=int, default=128)
 args.add_argument('--dataset', type=str, default='challenge',
                   choices=['challenge', 'our'])
 
@@ -27,11 +25,7 @@ if __name__ == '__main__':
     config = args.parse_args()
 
     SAVED_MODEL_PATH = config.saved_model 
-
-    if config.task == 'vad':
-        N_CLASSES = 2
-    else:
-        N_CLASSES = 11
+    N_CLASSES = 11
 
     # 1. Loading a saved model
     x = tf.keras.layers.Input(shape=(257, None, 4))
@@ -44,10 +38,6 @@ if __name__ == '__main__':
                            utils=tf.keras.utils,
                            )
     model.load_weights(SAVED_MODEL_PATH)
-
-    # model = tf.keras.models.load_model(SAVED_MODEL_PATH, compile=False)
-    if config.verbose:
-        model.summary()
 
     PATH = '/media/data1/datasets/ai_challenge/icassp/'
 
@@ -64,16 +54,25 @@ if __name__ == '__main__':
             [np.load(os.path.join(PATH, 'test_y.npy')),
              np.load(os.path.join(PATH, 'noise_test_y.npy'))],
             axis=0)
-    # eval_x = normalize_spec(eval_x, norm=config.norm)
-    n_chan = eval_x.shape[-1] // 2
-    eval_x[..., :n_chan] = np.log(eval_x[..., :n_chan] + 1e-8)
-    eval_y = azimuth_to_classes(eval_y, N_CLASSES, one_hot=False)
+
+    eval_x = log_magphase(eval_x) 
+    eval_y = degree_to_class(eval_y, one_hot=False)
+
+    window = np.arange(config.window_size)
 
     # 3. predict
-    pred_y = model.predict(eval_x)
-    if config.verbose:
-        print(pred_y[:5])
-        print(np.max(pred_y, axis=1))
+    for x, y in zip(eval_x, eval_y):
+        x = np.transpose(x, (1, 0, 2)) # to time, freq, chan
+        x = seq_to_windows(x, window=window)
+        # (n_win, win, freq, chan) -> (n_win, freq, win, chan)
+        x = np.transpose(x, (0, 2, 1, 3))
+        pred_y = model.predict(x)
+        mask = pred_y.max(axis=-1) > 0.5
+        pred_y[mask, :-1] = 0
+        pred_y = pred_y.argmax(axis=-1)
+        print(y, pred_y)
+        pred_y = pred_y[pred_y != N_CLASSES-1]
+        import pdb;pdb.set_trace()
 
     n_classes = pred_y.shape[-1]
     pred_y = np.argmax(pred_y, axis=1)

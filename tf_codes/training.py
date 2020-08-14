@@ -6,135 +6,159 @@ from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
-from tensorflow.keras.experimental import CosineDecay, CosineDecayRestarts
-import keras
 
 from models import dense_net_based_model
+from efficientnet.model import EfficientNetB0
 from utils import *
 from swa import SWA
 
 
 args = argparse.ArgumentParser()
-args.add_argument('--model_name', type=str, default='model')
-args.add_argument('--pretrain', type=str, default='')
-args.add_argument('--norm', type=bool, default=False)
-args.add_argument('--cls_weights', type=bool, default=False)
-args.add_argument('--augment', type=bool, default=True)
-args.add_argument('--mask', type=bool, default=True)
-args.add_argument('--equalizer', type=bool, default=False)
-args.add_argument('--roll', type=bool, default=True)
-args.add_argument('--flip', type=bool, default=False)
-args.add_argument('--se', type=bool, default=False)
-args.add_argument('--ratio', type=float, default=1.)
-args.add_argument('--task', type=str, required=True, 
-                  choices=('vad', 'both'))
-args.add_argument('--type', type=str, required=True, 
-                  choices=('spec', 'mel'))
+args.add_argument('--name', type=str, default='model_0')
+args.add_argument('--gpus', type=str, default='0')
+
+
+def augment(spec, label):
+    spec = freq_mask(spec)
+    spec = time_mask(spec)
+    # spec = random_roll(spec)
+    spec = freq_shift()(spec)
+    spec, label = random_flip(spec, label)
+    return spec, label
+
+
+def make_dataset(x, y, n_proc, batch_per_node, train=False, **kwargs):
+    dataset = tf.data.Dataset.from_tensor_slices((x, y)).cache()
+    if train:
+        dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
+        dataset = dataset.repeat().shuffle(buffer_size=len(x))
+    dataset = dataset.batch(batch_per_node, drop_remainder=True)
+    if train:
+        dataset = dataset.map(mixup())
+    dataset = dataset.map(log)
+    return dataset.prefetch(AUTOTUNE)
 
 
 if __name__ == "__main__":
     config = args.parse_args()
-    print(config)
-    devices = ['/device:GPU:{}'.format(i) for i in (0, 1, 2, 3)]
-    strategy = tf.distribute.MirroredStrategy(devices)
 
-    """ HYPER_PARAMETERS """
-    BATCH_SIZE = 256 // len(devices) # per each GPU
-    TOTAL_EPOCH = 150
-    VAL_SPLIT = 0.15
+    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+    os.environ['CUDA_VISIBLE_DEVICES'] = config.gpus
+    strategy = tf.distribute.MirroredStrategy()
 
-    if config.task == 'vad':
-        N_CLASSES = 2
-    else:
-        N_CLASSES = 11
+    TOTAL_EPOCH = 250
+    BATCH_SIZE = 32
+    N_CLASSES = 11
+    VAL_SPLIT = 0.1
 
-    freq = int(config.ratio * 257)
-
-    """ DATA """
-    # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
-    PATH = '/datasets/ai_challenge/icassp/'
-    prefixes = [
-        'train_', 'gen_', 'new_train_', 'new_train_', 'new_train2_', 'noise_train_']
-
-    x = [prefix+'x.npy' if config.type=='spec' else prefix+'x_mel.npy'
-         for prefix in prefixes]
-    x = [np.load(os.path.join(PATH, _x)) for _x in x]
-    x = np.concatenate(x, axis=0)
-
-    y = [prefix+'y.npy' for prefix in prefixes]
-    y = [np.load(os.path.join(PATH, _y)) for _y in y]
-    y = np.concatenate(y, axis=0)
-    
-    # split input data
-    x = x[:, :int(config.ratio * 257)]
-
-    # aggregate and normalize
-    x = normalize_spec(x, norm=config.norm)
-    y = azimuth_to_classes(y, N_CLASSES, smoothing=True)
-
-    # 2. SPLITTING TRAIN AND VALIDATION SET
-    train_size = x.shape[0] - x.shape[0] % BATCH_SIZE
-    perm = np.random.permutation(x.shape[0])[:train_size]
-    val_size = BATCH_SIZE * int(train_size / BATCH_SIZE * VAL_SPLIT)
-
-    x, val_x = x[perm[:-val_size]], x[perm[-val_size:]]
-    y, val_y = y[perm[:-val_size]], y[perm[-val_size:]]
-
-    # 3. Class Weights
-    if config.cls_weights:
-        class_weight = {i: (1/N_CLASSES) / np.mean(y==i) 
-                        for i in range(N_CLASSES)}
-    else:
-        class_weight = None
-
-    """ MODEL """
     with strategy.scope():
-        if len(config.pretrain) == 0:
-            freq, time, chan = x.shape[1:]
+        """ MODEL """
+        '''
+        freq, time, chan = x.shape[1:]
 
-            model = dense_net_based_model(
-                input_shape=(freq, None, chan),
-                n_classes=N_CLASSES,
-                n_layer_per_block=[4, 6, 10, 6],
-                growth_rate=12,
-                activation='softmax',
-                se=config.se,
-                kernel_regularizer=tf.keras.regularizers.l2(1e-5))
-        else:
-            model = tf.keras.models.load_model(config.pretrain, compile=False)
+        model = dense_net_based_model(
+            input_shape=(freq, None, chan),
+            n_classes=N_CLASSES,
+            n_layer_per_block=[6, 12, 24, 16],
+            growth_rate=24,
+            activation='softmax',
+            kernel_regularizer=tf.keras.regularizers.l2(1e-4))
+        '''
+        x = tf.keras.layers.Input(shape=(257, None, 4))
+        model = EfficientNetB0(weights=None,
+                               input_tensor=x,
+                               classes=N_CLASSES, 
+                               backend=tf.keras.backend,
+                               layers=tf.keras.layers,
+                               models=tf.keras.models,
+                               utils=tf.keras.utils,
+                               )
 
-        lr = tf.optimizers.schedules.PiecewiseConstantDecay(
-                [750, 75000, 75000],
-                [0.1, 0.01, 0.001, 0.0001])
-        opt = SGD(lr, momentum=0.9, nesterov=True)
-
+        opt = Adam()
         model.compile(optimizer=opt, 
                       loss='categorical_crossentropy',
                       metrics=['accuracy', 'AUC'])
         model.summary()
 
-    """ TRAINING """
-    with strategy.scope():
+        """ DATA """
+        # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
+        PATH = '/datasets/ai_challenge/icassp/'
+        '''
+        prefixes = [
+            'train', 'gen', 'new_train', 'new_train', 'new_train2'] # , 'noise_train']
+
+        x = np.concatenate(
+            [np.load(os.path.join(PATH, f'{prefix}_x.npy')) for prefix in prefixes],
+            axis=0)
+
+        y = np.concatenate(
+            [np.load(os.path.join(PATH, f'{prefix}_y.npy')) for prefix in prefixes],
+            axis=0)
+        '''
+        test_x = [
+            np.load(os.path.join(PATH, 'final_x.npy')),
+            np.load(os.path.join(PATH, '50_x.npy')),
+        ]
+        test_y = [
+            np.load(os.path.join(PATH, 'final_y.npy')),
+            np.load(os.path.join(PATH, '50_y.npy')),
+        ]
+
+        PATH = '/datasets/ai_challenge/interspeech20/'
+        x = np.load(os.path.join(PATH, 'shuffled_train_x.npy'))
+        y = np.load(os.path.join(PATH, 'shuffled_train_y.npy'))
+        test_x.append(np.load(os.path.join(PATH, 'test_x.npy')))
+        test_y.append(np.load(os.path.join(PATH, 'test_y.npy')))
+
+        target = max([f.shape for f in test_x])[1:]
+        test_x = [
+            np.pad(t_x, 
+                [[0, 0]] + [[0, target[i]-t_x.shape[i+1]] for i in range(len(target))]) 
+            for t_x in test_x]
+        test_x = np.concatenate(test_x, axis=0)
+        test_y = np.concatenate(test_y, axis=0)
+        print('data loading finished')
+        
+        # pre-process
+        y = azimuth_to_classes(y, N_CLASSES, smoothing=False)
+        test_y = azimuth_to_classes(test_y, N_CLASSES, smoothing=False)
+
+        # 2. SPLITTING TRAIN AND VALIDATION SET
+        train_size = x.shape[0] - x.shape[0] % BATCH_SIZE
+        perm = np.random.permutation(x.shape[0])[:train_size]
+        val_size = BATCH_SIZE * int(train_size / BATCH_SIZE * VAL_SPLIT)
+
+        # x, val_x = x[perm[:-val_size]], x[perm[-val_size:]]
+        # y, val_y = y[perm[:-val_size]], y[perm[-val_size:]]
+        # importing already shuffled datasets
+        # x, val_x = x[:-val_size], x[-val_size:]
+        # y, val_y = y[:-val_size], y[-val_size:]
+        val_x = test_x
+        val_y = test_y
+        print(x.shape, y.shape)
+        print('data spliting finished')
+
+        """ TRAINING """
         train_dataset = make_dataset(x, y, 
                                      n_proc=strategy.num_replicas_in_sync,
                                      batch_per_node=BATCH_SIZE,
-                                     train=config.augment,
-                                     mask=config.mask,
-                                     equalizer=config.equalizer,
-                                     roll=config.roll,
-                                     flip=config.flip)
+                                     train=True)
         val_dataset = make_dataset(val_x, val_y, 
                                    n_proc=strategy.num_replicas_in_sync,
                                    batch_per_node=BATCH_SIZE,
                                    train=False)
 
         callbacks = [
-            # EarlyStopping(monitor='val_accuracy',
-            #               patience=50 if config.norm else 25),
-            CSVLogger(config.model_name + '.log',
+            EarlyStopping(monitor='val_accuracy',
+                          patience=32),
+            CSVLogger(config.name + '.log',
                       append=True),
-            SWA(start_epoch=80, swa_freq=2),
-            ModelCheckpoint(config.model_name+'.h5',
+            ReduceLROnPlateau(monitor='accuracy',
+                              factor=0.9,
+                              patience=4,
+                              mode='max'),
+            SWA(start_epoch=75, swa_freq=2),
+            ModelCheckpoint(config.name+'.h5',
                             monitor='val_accuracy',
                             save_best_only=True),
             TerminateOnNaN()
@@ -144,18 +168,19 @@ if __name__ == "__main__":
                   epochs=TOTAL_EPOCH,
                   validation_data=val_dataset,
                   steps_per_epoch=x.shape[0]//BATCH_SIZE,
-                  callbacks=callbacks,
-                  class_weight=class_weight)
+                  callbacks=callbacks)
 
-        model.evaluate(val_dataset, verbose=1)
+        result = model.evaluate(test_x, test_y, verbose=1)
+        with open(config.name + '.log', 'a') as f:
+            f.write(f'\n{result}')
 
-        # For SWA
-        repeat = x.shape[0] // BATCH_SIZE
-        for x, y in train_dataset:
-            model(x, training=True)
-            repeat -= 1
-            if repeat <= 0:
-                break
+    # For SWA
+    repeat = x.shape[0] // BATCH_SIZE
+    for x, y in train_dataset:
+        model(x, training=True)
+        repeat -= 1
+        if repeat <= 0:
+            break
 
-        model.evaluate(val_dataset, verbose=1)
-        model.save(config.model_name+"_SWA.h5")
+    model.evaluate(test_x, test_y, verbose=1)
+    model.save(config.name+"_SWA.h5")

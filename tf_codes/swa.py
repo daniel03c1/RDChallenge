@@ -3,17 +3,19 @@ import tensorflow as tf
 
 
 class SWA(tf.keras.callbacks.Callback):
-    def __init__(self, start_epoch, swa_freq=1):
+    def __init__(self, start_epoch, swa_freq=1, verbose=True):
         super(SWA, self).__init__()
         self.start_epoch = start_epoch - 1
         self.swa_freq = swa_freq
         self.swa_weights = None
         self.cnt = 0
+        self.verbose = verbose
 
     def on_epoch_end(self, epoch, logs=None):
         epoch = epoch - self.start_epoch
         if epoch == 0 or (epoch > 0 and epoch % self.swa_freq == 0):
-            print("\nSaving Weights... ", epoch+self.start_epoch)
+            if self.verbose:
+                print("\nSaving Weights... ", epoch+self.start_epoch)
             self.update_swa_weights()
 
     def on_train_end(self, logs=None):
