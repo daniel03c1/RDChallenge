@@ -5,6 +5,8 @@ import tensorflow as tf
 from sklearn.metrics import confusion_matrix
 from tensorflow.keras.metrics import *
 from utils import *
+from transforms import *
+from metrics import score
 
 from efficientnet.model import EfficientNetB0
 
@@ -15,10 +17,8 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
 args = argparse.ArgumentParser()
 args.add_argument('--saved_model', type=str, required=True)
-args.add_argument('--norm', type=bool, default=False)
+args.add_argument('--norm', type=bool, default=True)
 args.add_argument('--verbose', type=bool, default=False)
-args.add_argument('--task', type=str, default='vad',
-                  choices=('vad', 'both'))
 args.add_argument('--dataset', type=str, default='challenge',
                   choices=['challenge', 'our'])
 
@@ -26,12 +26,7 @@ args.add_argument('--dataset', type=str, default='challenge',
 if __name__ == '__main__':
     config = args.parse_args()
 
-    SAVED_MODEL_PATH = config.saved_model 
-
-    if config.task == 'vad':
-        N_CLASSES = 2
-    else:
-        N_CLASSES = 11
+    N_CLASSES = 11
 
     # 1. Loading a saved model
     x = tf.keras.layers.Input(shape=(257, None, 4))
@@ -43,9 +38,8 @@ if __name__ == '__main__':
                            models=tf.keras.models,
                            utils=tf.keras.utils,
                            )
-    model.load_weights(SAVED_MODEL_PATH)
+    model.load_weights(config.saved_model)
 
-    # model = tf.keras.models.load_model(SAVED_MODEL_PATH, compile=False)
     if config.verbose:
         model.summary()
 
@@ -64,10 +58,12 @@ if __name__ == '__main__':
             [np.load(os.path.join(PATH, 'test_y.npy')),
              np.load(os.path.join(PATH, 'noise_test_y.npy'))],
             axis=0)
-    # eval_x = normalize_spec(eval_x, norm=config.norm)
+
     n_chan = eval_x.shape[-1] // 2
-    eval_x[..., :n_chan] = np.log(eval_x[..., :n_chan] + 1e-8)
-    eval_y = azimuth_to_classes(eval_y, N_CLASSES, one_hot=False)
+    if config.norm:
+        eval_x = minmax_norm_magphase(eval_x)
+    eval_x = log_magphase(eval_x)
+    eval_y = degree_to_class(eval_y, one_hot=False)
 
     # 3. predict
     pred_y = model.predict(eval_x)
@@ -76,19 +72,13 @@ if __name__ == '__main__':
         print(np.max(pred_y, axis=1))
 
     n_classes = pred_y.shape[-1]
-    pred_y = np.argmax(pred_y, axis=1)
-    pred_y = class_to_azimuth(pred_y)
-    pred_y = azimuth_to_classes(pred_y, N_CLASSES, one_hot=False)
+    pred_y = np.argmax(pred_y, axis=-1)
 
     print("GROUND TRUTH\n", eval_y)
     print("PREDICTIONS\n", pred_y)
 
     print("Accuracy:", Accuracy()(eval_y, pred_y).numpy())
-    if N_CLASSES == 2:
-        print("Precision:", Precision()(eval_y, pred_y).numpy())
-        print("Recall:", Recall()(eval_y, pred_y).numpy())
-    else:
-        print("SCORE:", 
-              score(class_to_azimuth(eval_y),
-                    class_to_azimuth(pred_y)).numpy())
+    print("SCORE:", 
+          score(class_to_degree(eval_y),
+                class_to_degree(pred_y)).numpy())
     print(confusion_matrix(eval_y, pred_y))

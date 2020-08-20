@@ -17,6 +17,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 args = argparse.ArgumentParser()
 args.add_argument('--saved_model', type=str, required=True)
 args.add_argument('--window_size', type=int, default=128)
+args.add_argument('--freq_first', type=bool, default=False)
 args.add_argument('--dataset', type=str, default='challenge',
                   choices=['challenge', 'our'])
 
@@ -28,7 +29,11 @@ if __name__ == '__main__':
     N_CLASSES = 11
 
     # 1. Loading a saved model
-    x = tf.keras.layers.Input(shape=(257, None, 4))
+    if config.freq_first:
+        shape = (257, None, 4)
+    else:
+        shape = (None, 257, 4)
+    x = tf.keras.layers.Input(shape=shape)
     model = EfficientNetB0(weights=None,
                            input_tensor=x,
                            classes=N_CLASSES, 
@@ -65,7 +70,8 @@ if __name__ == '__main__':
         x = np.transpose(x, (1, 0, 2)) # to time, freq, chan
         x = seq_to_windows(x, window=window)
         # (n_win, win, freq, chan) -> (n_win, freq, win, chan)
-        x = np.transpose(x, (0, 2, 1, 3))
+        if config.freq_first:
+            x = np.transpose(x, (0, 2, 1, 3))
         pred_y = model.predict(x)
         mask = pred_y.max(axis=-1) > 0.5
         pred_y[mask, :-1] = 0

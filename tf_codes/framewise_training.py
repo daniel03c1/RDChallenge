@@ -2,6 +2,7 @@ import argparse
 import numpy as np
 import os
 import tensorflow as tf
+import tensorflow_addons as tfa
 from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
@@ -23,12 +24,11 @@ args.add_argument('--win_size', type=int, default=128)
 args.add_argument('--n_chan', type=int, default=2)
 
 
-def framewise_augment(win_size):
+def framewise_augment(win_size, time_axis=0, freq_axis=1):
     def augment(specs, labels):
-        print(specs.shape)
-        specs = mask(specs, axis=0, max_mask_size=win_size//4) # time
-        specs = mask(specs, axis=1, max_mask_size=32) # freq
-        # specs = random_shift(specs, axis=1, width=16)
+        specs = mask(specs, axis=time_axis, max_mask_size=win_size//4) # time
+        specs = mask(specs, axis=freq_axis, max_mask_size=32) # freq
+        specs = random_shift(specs, axis=freq_axis, width=8)
         specs, labels = random_magphase_flip(specs, labels)
         return specs, labels
     return augment
@@ -81,7 +81,7 @@ if __name__ == "__main__":
                                utils=tf.keras.utils,
                                )
 
-        opt = Adam()
+        opt = Adam(0.0005)
         model.compile(optimizer=opt, 
                       loss='categorical_crossentropy',
                       metrics=['accuracy', 'AUC'])

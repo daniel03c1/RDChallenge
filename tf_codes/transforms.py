@@ -33,14 +33,19 @@ def mask(specs, axis, max_mask_size=None, n_mask=1):
 def random_shift(specs, axis=0, width=16):
     new_specs = tf.pad(specs, [[0]*2 if i != axis else [width]*2
                                for i in range(len(specs.shape))])
+    '''
     begin = [0] * len(specs.shape)
-    end = [s for s in new_specs.shape]
+    end = [s for s in specs.shape]
+    print(begin, end)
 
     left = tf.random.uniform([], maxval=width*2, dtype=tf.int32)
     begin[axis] = left
-    end[axis] -= width*2 - left + 1
+    end[axis] += left - 1
+    print(begin, end, specs.shape)
 
     new_specs = tf.slice(new_specs, begin, end)
+    '''
+    new_specs = tf.image.random_crop(new_specs, specs.shape)
     return new_specs
 
 
@@ -103,6 +108,27 @@ def log_magphase(specs, labels=None):
     specs = tf.concat(
             [tf.math.log(specs[..., :n_chan]+EPSILON), specs[..., n_chan:]],
             axis=-1)
+    if labels is not None:
+        return specs, labels
+    return specs
+
+
+def minmax_norm_magphase(specs, labels=None):
+    n_chan = specs.shape[-1] // 2
+    mag = specs[..., :n_chan]
+    phase = specs[..., n_chan:]
+    axis = tuple(range(1, len(specs.shape)))
+
+    mag_max = tf.math.reduce_max(mag, axis=axis, keepdims=True)
+    mag_min = tf.math.reduce_min(mag, axis=axis, keepdims=True)
+    phase_max = tf.math.reduce_max(phase, axis=axis, keepdims=True)
+    phase_min = tf.math.reduce_min(phase, axis=axis, keepdims=True)
+
+    specs = tf.concat(
+        [(mag-mag_min)/(mag_max-mag_min+EPSILON),
+         (phase-phase_min)/(phase_max-phase_min+EPSILON)],
+        axis=-1)
+
     if labels is not None:
         return specs, labels
     return specs

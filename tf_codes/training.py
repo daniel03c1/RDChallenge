@@ -1,69 +1,65 @@
 import argparse
-import numpy as np
 import os
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
 
-from models import dense_net_based_model
 from efficientnet.model import EfficientNetB0
-from utils import *
 from swa import SWA
+from transforms import *
+from utils import *
 
 
 args = argparse.ArgumentParser()
 args.add_argument('--name', type=str, default='model_0')
-args.add_argument('--gpus', type=str, default='0')
+
+# HYPER_PARAMETERS
+args.add_argument('--epochs', type=int, default=250)
+args.add_argument('--batch_size', type=int, default=32)
+args.add_argument('--n_chan', type=int, default=2)
+args.add_argument('--lr', type=float, default=0.001)
 
 
-def augment(spec, label):
-    spec = freq_mask(spec)
-    spec = time_mask(spec)
-    # spec = random_roll(spec)
-    spec = freq_shift()(spec)
-    spec, label = random_flip(spec, label)
-    return spec, label
+def augment(specs, labels, time_axis=1, freq_axis=0):
+    specs = mask(specs, axis=time_axis, max_mask_size=32) # time
+    specs = mask(specs, axis=freq_axis, max_mask_size=24) # freq
+    specs = random_shift(specs, axis=freq_axis, width=8)
+    specs, labels = random_magphase_flip(specs, labels)
+    return specs, labels
 
 
-def make_dataset(x, y, n_proc, batch_per_node, train=False, **kwargs):
+def make_dataset(specs, labels, 
+                 batch_size,
+                 train=False, 
+                 **kwargs):
     dataset = tf.data.Dataset.from_tensor_slices((x, y)).cache()
     if train:
         dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
-        dataset = dataset.repeat().shuffle(buffer_size=len(x))
-    dataset = dataset.batch(batch_per_node, drop_remainder=True)
+        dataset = dataset.repeat().shuffle(buffer_size=len(x)//4)
+    dataset = dataset.batch(batch_size, drop_remainder=True)
     if train:
-        dataset = dataset.map(mixup())
-    dataset = dataset.map(log)
-    return dataset.prefetch(AUTOTUNE)
+        dataset = dataset.map(magphase_mixup(alpha=1.))
+    dataset = dataset.map(minmax_norm_magphase)
+    dataset = dataset.map(log_magphase)
+    return dataset #.prefetch(AUTOTUNE)
 
 
 if __name__ == "__main__":
     config = args.parse_args()
+    print(config)
 
-    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-    os.environ['CUDA_VISIBLE_DEVICES'] = config.gpus
     strategy = tf.distribute.MirroredStrategy()
 
-    TOTAL_EPOCH = 250
-    BATCH_SIZE = 32
+    TOTAL_EPOCH = config.epochs
+    BATCH_SIZE = config.batch_size
     N_CLASSES = 11
     VAL_SPLIT = 0.1
 
     with strategy.scope():
         """ MODEL """
-        '''
-        freq, time, chan = x.shape[1:]
-
-        model = dense_net_based_model(
-            input_shape=(freq, None, chan),
-            n_classes=N_CLASSES,
-            n_layer_per_block=[6, 12, 24, 16],
-            growth_rate=24,
-            activation='softmax',
-            kernel_regularizer=tf.keras.regularizers.l2(1e-4))
-        '''
         x = tf.keras.layers.Input(shape=(257, None, 4))
         model = EfficientNetB0(weights=None,
                                input_tensor=x,
@@ -74,7 +70,7 @@ if __name__ == "__main__":
                                utils=tf.keras.utils,
                                )
 
-        opt = Adam()
+        opt = Adam(config.lr)
         model.compile(optimizer=opt, 
                       loss='categorical_crossentropy',
                       metrics=['accuracy', 'AUC'])
@@ -82,91 +78,81 @@ if __name__ == "__main__":
 
         """ DATA """
         # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
-        PATH = '/datasets/ai_challenge/icassp/'
-        '''
-        prefixes = [
-            'train', 'gen', 'new_train', 'new_train', 'new_train2'] # , 'noise_train']
-
-        x = np.concatenate(
-            [np.load(os.path.join(PATH, f'{prefix}_x.npy')) for prefix in prefixes],
-            axis=0)
-
-        y = np.concatenate(
-            [np.load(os.path.join(PATH, f'{prefix}_y.npy')) for prefix in prefixes],
-            axis=0)
-        '''
-        test_x = [
-            np.load(os.path.join(PATH, 'final_x.npy')),
-            np.load(os.path.join(PATH, '50_x.npy')),
-        ]
-        test_y = [
-            np.load(os.path.join(PATH, 'final_y.npy')),
-            np.load(os.path.join(PATH, '50_y.npy')),
-        ]
+        PATH = '/datasets/ai_challenge/icassp'
+        prefixes = ['gen'] # , 'noise_train']
+        x = [np.load(os.path.join(PATH, f'{pre}_x.npy'))
+             for pre in prefixes]
+        y = [np.load(os.path.join(PATH, f'{pre}_y.npy'))
+             for pre in prefixes]
+        test_x = [np.load(os.path.join(PATH, '50_x.npy'))]
+        test_y = [np.load(os.path.join(PATH, '50_y.npy'))]
 
         PATH = '/datasets/ai_challenge/interspeech20/'
-        x = np.load(os.path.join(PATH, 'shuffled_train_x.npy'))
-        y = np.load(os.path.join(PATH, 'shuffled_train_y.npy'))
+        x.append(np.load(os.path.join(PATH, 'shuffled_train_x.npy')))
+        y.append(np.load(os.path.join(PATH, 'shuffled_train_y.npy')))
         test_x.append(np.load(os.path.join(PATH, 'test_x.npy')))
         test_y.append(np.load(os.path.join(PATH, 'test_y.npy')))
+        print('data loading finished')
 
-        target = max([f.shape for f in test_x])[1:]
-        test_x = [
-            np.pad(t_x, 
-                [[0, 0]] + [[0, target[i]-t_x.shape[i+1]] for i in range(len(target))]) 
-            for t_x in test_x]
+        max_len = max([_x.shape[2] for _x in x])
+        x = [np.pad(_x, ((0, 0), (0, 0), (0, max_len-_x.shape[2]), (0, 0)))
+             for _x in x]
+        max_len = max([_x.shape[2] for _x in test_x])
+        test_x = [np.pad(_x, ((0, 0), (0, 0), (0, max_len-_x.shape[2]), (0, 0)))
+                  for _x in test_x]
+        print('padding finished')
+
+        xs = np.concatenate(x, axis=0)
+        ys = np.concatenate(y, axis=0)
         test_x = np.concatenate(test_x, axis=0)
         test_y = np.concatenate(test_y, axis=0)
-        print('data loading finished')
+        del x[:], y[:]
+        x, y = xs, ys
+        print('data concatenating finished')
         
         # pre-process
-        y = azimuth_to_classes(y, N_CLASSES, smoothing=False)
-        test_y = azimuth_to_classes(test_y, N_CLASSES, smoothing=False)
+        y = degree_to_class(y, one_hot=True).astype(np.float32)
+        test_y = degree_to_class(test_y, one_hot=True).astype(np.float32)
 
         # 2. SPLITTING TRAIN AND VALIDATION SET
-        train_size = x.shape[0] - x.shape[0] % BATCH_SIZE
-        perm = np.random.permutation(x.shape[0])[:train_size]
-        val_size = BATCH_SIZE * int(train_size / BATCH_SIZE * VAL_SPLIT)
+        train_size = len(x)
+        val_size = int(train_size * VAL_SPLIT)
+        indices = np.random.permutation(train_size)
 
-        # x, val_x = x[perm[:-val_size]], x[perm[-val_size:]]
-        # y, val_y = y[perm[:-val_size]], y[perm[-val_size:]]
-        # importing already shuffled datasets
-        # x, val_x = x[:-val_size], x[-val_size:]
-        # y, val_y = y[:-val_size], y[-val_size:]
-        val_x = test_x
-        val_y = test_y
-        print(x.shape, y.shape)
+        x, val_x = x[indices[:-val_size]], x[indices[-val_size:]]
+        y, val_y = y[indices[:-val_size]], y[indices[-val_size:]]
         print('data spliting finished')
+
+        val_x = log_magphase(val_x)
+        test_x = log_magphase(test_x)
 
         """ TRAINING """
         train_dataset = make_dataset(x, y, 
-                                     n_proc=strategy.num_replicas_in_sync,
-                                     batch_per_node=BATCH_SIZE,
+                                     BATCH_SIZE,
                                      train=True)
-        val_dataset = make_dataset(val_x, val_y, 
-                                   n_proc=strategy.num_replicas_in_sync,
-                                   batch_per_node=BATCH_SIZE,
-                                   train=False)
 
         callbacks = [
-            EarlyStopping(monitor='val_accuracy',
-                          patience=32),
+            EarlyStopping(monitor='val_auc',
+                          patience=50,
+                          mode='max'),
             CSVLogger(config.name + '.log',
                       append=True),
-            ReduceLROnPlateau(monitor='accuracy',
+            ReduceLROnPlateau(monitor='auc',
                               factor=0.9,
                               patience=4,
                               mode='max'),
             SWA(start_epoch=75, swa_freq=2),
             ModelCheckpoint(config.name+'.h5',
-                            monitor='val_accuracy',
+                            monitor='val_auc',
+                            mode='max',
                             save_best_only=True),
             TerminateOnNaN()
         ]
 
         model.fit(train_dataset,
                   epochs=TOTAL_EPOCH,
-                  validation_data=val_dataset,
+                  batch_size=BATCH_SIZE,
+                  validation_data=(val_x, val_y),
                   steps_per_epoch=x.shape[0]//BATCH_SIZE,
                   callbacks=callbacks)
 

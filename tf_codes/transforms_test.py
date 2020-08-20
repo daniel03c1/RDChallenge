@@ -34,9 +34,9 @@ class TransformsTest(tf.test.TestCase):
         org = np.array([[0, 1, 2],
                         [3, 4, 5],
                         [6, 7, 8]])
-        target = np.array([[0, 0, 0],
-                           [0, 1, 2],
-                           [3, 4, 5]])
+        target = np.array([[3, 4, 5],
+                           [6, 7, 8],
+                           [0, 0, 0]])
         self.assertAllEqual(target, 
                             random_shift(org, axis=0, width=2))
 
@@ -92,6 +92,21 @@ class TransformsTest(tf.test.TestCase):
         t_specs = np.array([[0.      , 2.302585, 4.605170,  0,  1, -1],
                             [6.214608, 3.912023, 1.609438,  3, -3,  0]])
         self.assertAllClose(t_specs, log_magphase(specs))
+
+    def test_minmax_norm_magphse(self):
+        n_sample, n_feature, n_chan = 5, 10, 2
+        axis = tuple(range(1, 3))
+        mag = np.random.randn(n_sample, n_feature, n_chan)
+        phase = np.random.rand(n_sample, n_feature, n_chan)
+        phase = (2*phase - 1) * np.pi
+        magphase = np.concatenate([mag, phase], axis=-1)
+
+        minmax_normed = minmax_norm_magphase(magphase)
+        mins = tf.math.reduce_min(minmax_normed, axis=axis)
+        maxs = tf.math.reduce_max(minmax_normed, axis=axis)
+
+        self.assertAllClose(mins, tf.zeros_like(mins))
+        self.assertAllClose(maxs, tf.ones_like(maxs))
 
 
 if __name__ == '__main__':
