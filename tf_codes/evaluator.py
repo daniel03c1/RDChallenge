@@ -8,7 +8,7 @@ from utils import *
 from transforms import *
 from metrics import score
 
-from efficientnet.model import EfficientNetB0
+import efficientnet.model as model
 
 # disable GPU
 import os
@@ -16,7 +16,8 @@ os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
 args = argparse.ArgumentParser()
-args.add_argument('--saved_model', type=str, required=True)
+args.add_argument('--name', type=str, required=True)
+args.add_argument('--model', type=str, default='EfficientNetB0')
 args.add_argument('--norm', type=bool, default=True)
 args.add_argument('--verbose', type=bool, default=False)
 args.add_argument('--dataset', type=str, default='challenge',
@@ -30,15 +31,16 @@ if __name__ == '__main__':
 
     # 1. Loading a saved model
     x = tf.keras.layers.Input(shape=(257, None, 4))
-    model = EfficientNetB0(weights=None,
-                           input_tensor=x,
-                           classes=N_CLASSES, 
-                           backend=tf.keras.backend,
-                           layers=tf.keras.layers,
-                           models=tf.keras.models,
-                           utils=tf.keras.utils,
-                           )
-    model.load_weights(config.saved_model)
+    model = getattr(model, config.model)(
+        weights=None,
+        input_tensor=x,
+        classes=N_CLASSES, 
+        backend=tf.keras.backend,
+        layers=tf.keras.layers,
+        models=tf.keras.models,
+        utils=tf.keras.utils,
+    )
+    model.load_weights(config.name)
 
     if config.verbose:
         model.summary()

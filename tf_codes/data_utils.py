@@ -7,13 +7,15 @@ from scipy.io import loadmat
 from tqdm import tqdm
 
 
-def from_wav_to_dataset(path, name=None, pickled=False):
+def from_wav_to_dataset(path, feature='magphase', name=None, pickled=False):
     files = sorted(os.listdir(path))
     dataset = []
     max_len = 0
-    name = name if name is not None else 'dataset'
+    name = name if name is not None else path
 
     stft = torchaudio.transforms.Spectrogram(512, power=None)
+    mel = torchaudio.transforms.MelSpectrogram(n_fft=512,
+                                               n_mels=80)
 
     for f in tqdm(files):
         if not f.endswith('.wav'):
@@ -22,8 +24,12 @@ def from_wav_to_dataset(path, name=None, pickled=False):
         data = torchaudio.compliance.kaldi.resample_waveform(data,
                                                              sample_rate,
                                                              16000)
-        data = stft(data)
-        data = torch.cat(torchaudio.functional.magphase(data))
+
+        if feature == 'magphase':
+            data = stft(data)
+            data = torch.cat(torchaudio.functional.magphase(data))
+        else:
+            data = mel(data)
         data = data.numpy().transpose(1, 2, 0) # freq, time, chan
         dataset.append(data)
 
@@ -95,3 +101,7 @@ def load_dataset(folder_path,
 
     return specs, labels
 
+
+if __name__ == '__main__':
+    from_wav_to_dataset('/media/data1/datasets/ai_challenge/interspeech20/test',
+                        feature='mel', pickled=True)

@@ -133,3 +133,60 @@ def minmax_norm_magphase(specs, labels=None):
         return specs, labels
     return specs
 
+
+def cutmix(xs, ys):
+    '''
+    xs : [batch, height, width, chan] np.ndarray
+    ys : [batch, n_classes] np.ndarray
+    '''
+    xs = tf.cast(xs, tf.float32)
+    ys = tf.cast(ys, tf.float32)
+    batch, height, width, chan = xs.shape
+
+    # select lambda
+    sqrt_lmbda = tf.math.sqrt(tf.random.uniform([], maxval=1.))
+
+    # set size of window and recalculate lambda
+    size_h = tf.cast(height * sqrt_lmbda, dtype=tf.int32)
+    size_w = tf.cast(width * sqrt_lmbda, dtype=tf.int32)
+
+    # select window
+    offset_h = tf.random.uniform([], maxval=height-size_h, dtype=tf.int32)
+    offset_w = tf.random.uniform([], maxval=width-size_w, dtype=tf.int32)
+
+    windows = tf.ones([size_h, size_w], dtype=tf.float32)
+    windows = tf.pad(windows,
+                     [[offset_h, height-offset_h-size_h],
+                      [offset_w, width-offset_w-size_w]])
+    windows = tf.reshape(windows, (1, height, width, 1))
+
+    # shuffle
+    indices = tf.math.reduce_mean(tf.ones_like(ys), axis=-1)
+    indices = tf.cast(tf.math.cumsum(indices, exclusive=True), dtype='int32')
+    indices = tf.random.shuffle(indices)
+
+    # mix
+    xs = xs * (1-windows) + tf.gather(xs, indices, axis=0) * windows
+    mean = tf.cast((size_h * size_w) / (height * width), dtype=tf.float32)
+    ys = ys * (1-mean) + tf.gather(ys, indices, axis=0) * mean
+
+    return xs, ys
+
+
+def interclass_cutmix(xs, ys):
+    '''
+    xs : [batch, height, width, chan] np.ndarray
+    ys : [batch, n_classes] np.ndarray
+    '''
+    xs_, ys_ = [], []
+    cls = tf.argmax(ys, axis=-1)
+
+    for i in range(ys.shape[-1]):
+        select = tf.squeeze(tf.where(cls == i), axis=-1)
+        xs_temp = tf.gather(xs, select, axis=0)
+        ys_temp = tf.gather(ys, select, axis=0)
+        xs_temp, ys_temp = cutmix(xs_temp, ys_temp)
+        xs_.append(xs_temp)
+        ys_.append(ys_temp)
+
+    return tf.concat(xs_, axis=0), tf.concat(ys_, axis=0)

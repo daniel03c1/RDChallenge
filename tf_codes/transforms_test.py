@@ -108,6 +108,49 @@ class TransformsTest(tf.test.TestCase):
         self.assertAllClose(mins, tf.zeros_like(mins))
         self.assertAllClose(maxs, tf.ones_like(maxs))
 
+    def test_cutmix(self):
+        xs = np.array([[[[0], [0], [0]],
+                        [[0], [0], [0]],
+                        [[0], [0], [0]]],
+                       [[[1], [1], [1]],
+                        [[1], [1], [1]],
+                        [[1], [1], [1]]],
+                       [[[2], [2], [2]],
+                        [[2], [2], [2]],
+                        [[2], [2], [2]]]])
+        ys = np.array([[1, 0, 0],
+                       [0, 1, 0],
+                       [0, 0, 1]])
+        t_xs = np.array([[[[0], [1], [0]],
+                          [[0], [0], [0]],
+                          [[0], [0], [0]]],
+                         [[[1], [2], [1]],
+                          [[1], [1], [1]],
+                          [[1], [1], [1]]],
+                         [[[2], [0], [2]],
+                          [[2], [2], [2]],
+                          [[2], [2], [2]]]])
+        t_ys = np.array([[8/9, 1/9, 0],
+                         [0, 8/9, 1/9],
+                         [1/9, 0, 8/9]])
+
+        tf.random.set_seed(111)
+        cutmix_xs, cutmix_ys = cutmix(xs, ys)
+        self.assertAllClose(t_xs, cutmix_xs)
+        self.assertAllClose(t_ys, cutmix_ys)
+
+    def test_interclass_cutmix(self):
+        shape = (32, 16, 16, 3) # batch, height, width, chan
+        n_classes = 4
+        xs = np.random.randn(*shape)
+        ys = np.random.randint(n_classes, size=shape[0])
+        ys = np.eye(n_classes)[ys]
+
+        inter_xs, inter_ys = interclass_cutmix(xs, ys)
+        self.assertNotAllClose(xs, inter_xs)
+        self.assertAllEqual(tf.reduce_max(inter_ys, axis=-1),
+                            tf.ones(shape[0]))
+
 
 if __name__ == '__main__':
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
