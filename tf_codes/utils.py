@@ -143,3 +143,13 @@ def window_generator(specs,
     return generator
 
 
+'''
+MODEL
+'''
+def apply_kernel_regularizer(model, kernel_regularizer):
+    layer_types = (tf.keras.layers.Dense, tf.keras.layers.Conv2D)
+    for layer in model.layers:
+        if isinstance(layer, layer_types):
+            layer.kernel_regularizer = kernel_regularizer
+            layer.build(layer.input_shape)
+

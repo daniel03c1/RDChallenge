@@ -70,6 +70,35 @@ class UtilsTest(unittest.TestCase):
             self.assertEqual(win_size, len(s))
             # self.assertEqual(1, len(l))
 
+    def test_apply_kernel_regularizer(self):
+        n_samples, in_shape, out_shape = 128, 4, 4
+        x = np.random.randn(n_samples, in_shape)
+        y = np.random.randint(out_shape, size=n_samples)
+
+        # model without regularizer
+        tf.random.set_seed(0)
+        model = tf.keras.models.Sequential()
+        model.add(tf.keras.layers.Input(shape=(in_shape,)))
+        model.add(tf.keras.layers.Dense(out_shape, activation='softmax'))
+        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+
+        model.fit(x, y, verbose=False)
+        base_weights = model.weights[:]
+
+        # model with regularizer
+        tf.random.set_seed(0)
+        model = tf.keras.models.Sequential()
+        model.add(tf.keras.layers.Input(shape=(in_shape,)))
+        model.add(tf.keras.layers.Dense(out_shape, activation='softmax'))
+        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
+
+        apply_kernel_regularizer(model, tf.keras.regularizers.l2(0.1))
+
+        model.fit(x, y, verbose=False)
+        new_weights = model.weights[:]
+
+        for b, n in zip(base_weights, new_weights):
+            self.assertNotEqual(b.numpy().tolist(), n.numpy().tolist())
         
 
 if __name__ == '__main__':
