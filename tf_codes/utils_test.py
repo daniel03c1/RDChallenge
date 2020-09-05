@@ -90,16 +90,16 @@ class UtilsTest(unittest.TestCase):
         model = tf.keras.models.Sequential()
         model.add(tf.keras.layers.Input(shape=(in_shape,)))
         model.add(tf.keras.layers.Dense(out_shape, activation='softmax'))
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
 
-        apply_kernel_regularizer(model, tf.keras.regularizers.l2(0.1))
+        model = apply_kernel_regularizer(model, tf.keras.regularizers.l2(0.1))
+        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
 
         model.fit(x, y, verbose=False)
         new_weights = model.weights[:]
 
         for b, n in zip(base_weights, new_weights):
             self.assertNotEqual(b.numpy().tolist(), n.numpy().tolist())
-        
+
 
 if __name__ == '__main__':
     os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'

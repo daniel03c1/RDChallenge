@@ -1,11 +1,13 @@
 import argparse
-import os
 import numpy as np
+import os
+import pickle
 import tensorflow as tf
 from tensorflow.keras.callbacks import *
 from tensorflow.keras.losses import *
 from tensorflow.keras.metrics import *
 from tensorflow.keras.optimizers import *
+from functools import partial
 
 import efficientnet.model as model
 from swa import SWA
@@ -14,7 +16,7 @@ from utils import *
 
 
 args = argparse.ArgumentParser()
-args.add_argument('--name', type=str, default='model_0')
+args.add_argument('--name', type=str, default='infinite_B0')
 args.add_argument('--model', type=str, default='EfficientNetB0')
 args.add_argument('--optimizer', type=str, default='adam',
                                  choices=['adam', 'sgd', 'rmsprop'])
@@ -25,9 +27,10 @@ args.add_argument('--pretrain', type=bool, default=False)
 args.add_argument('--cls_weights', type=bool, default=False)
 
 # HYPER_PARAMETERS
-args.add_argument('--epochs', type=int, default=250)
+args.add_argument('--epochs', type=int, default=200)
 args.add_argument('--batch_size', type=int, default=32)
 args.add_argument('--n_chan', type=int, default=2)
+args.add_argument('--steps_per_epoch', type=int, default=100)
 
 # AUGMENTATION
 args.add_argument('--alpha', type=float, default=0.75)
@@ -35,24 +38,51 @@ args.add_argument('--l2', type=float, default=0)
 
 
 def augment(specs, labels, time_axis=1, freq_axis=0):
-    specs = mask(specs, axis=time_axis, max_mask_size=32) # time
-    specs = mask(specs, axis=freq_axis, max_mask_size=24) # freq
+    specs = mask(specs, axis=time_axis, max_mask_size=64) # time
+    specs = mask(specs, axis=freq_axis, max_mask_size=32) # freq
     specs = random_shift(specs, axis=freq_axis, width=8)
     specs, labels = random_magphase_flip(specs, labels)
     return specs, labels
 
 
-def make_dataset(specs, labels, 
+def to_generator(dataset):
+    def _gen():
+        if isinstance(dataset, tuple):
+            for z in zip(*dataset):
+                yield z
+        else:
+            for data in dataset:
+                yield data
+    return _gen
+
+
+def make_dataset(background, voice, label,
                  batch_size,
                  alpha=1,
                  **kwargs):
-    dataset = tf.data.Dataset.from_tensor_slices((x, y)).cache()
+    freq, _, chan = background[0].shape
+    b_dataset = tf.data.Dataset.from_generator(
+        to_generator(background),
+        tf.float32,
+        tf.TensorShape([freq, None, chan]))
+    b_dataset = b_dataset.repeat().shuffle(len(background))
 
+    v_dataset = tf.data.Dataset.from_generator(
+        to_generator((voice, label)),
+        (tf.float32, tf.int32),
+        (tf.TensorShape([freq, None, chan]), tf.TensorShape([])))
+    v_dataset = v_dataset.repeat().shuffle(len(voice))
+
+    dataset = tf.data.Dataset.zip((b_dataset, v_dataset))
+    dataset = dataset.map(partial(merge_complex_specs,
+                                  n_frame=300,
+                                  prob=0.9,
+                                  min_voice_ratio=2/3,
+                                  speed_rate=0.))
     dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
-    dataset = dataset.repeat().shuffle(buffer_size=len(x)//2)
     dataset = dataset.batch(batch_size, drop_remainder=True)
 
-    dataset = dataset.map(interbinary(mixup(alpha=alpha)))
+    dataset = dataset.map(interbinary(magphase_mixup(alpha=alpha, feat='complex')))
     dataset = dataset.map(minmax_norm_magphase)
     dataset = dataset.map(log_magphase)
     return dataset
@@ -68,7 +98,6 @@ if __name__ == "__main__":
     BATCH_SIZE = config.batch_size
     NAME = config.name if config.name.endswith('.h5') else config.name + '.h5'
     N_CLASSES = 11
-    VAL_SPLIT = 0.05 # 0.1
 
     with strategy.scope():
         """ MODEL """
@@ -96,73 +125,47 @@ if __name__ == "__main__":
         model.compile(optimizer=opt, 
                       loss='categorical_crossentropy',
                       metrics=['accuracy', 'AUC'])
-        model.summary()
+        # model.summary()
         
         if config.pretrain:
             model.load_weights(NAME)
             print('loadded pretrained model')
 
         """ DATA """
-        # 1. IMPORTING TRAINING DATA & PRE-PROCESSING
+        # TRAINING DATA
+        PATH = '/codes/generate_wavs'
+        backgrounds = pickle.load(
+            open(os.path.join(PATH, 'drone_complex_norm100_specs.pickle'), 'rb'))
+        voices = pickle.load(
+            open(os.path.join(PATH, 'voice_complex_norm100_specs.pickle'), 'rb'))
+        labels = np.load(os.path.join(PATH, 'voice_labels.npy'))
+
+        # TESTING DATA
         PATH = '/datasets/ai_challenge/icassp'
-        prefixes = ['gen'] # , 'noise_train']
-        x = [np.load(os.path.join(PATH, f'{pre}_x.npy'))
-             for pre in prefixes]
-        y = [np.load(os.path.join(PATH, f'{pre}_y.npy'))
-             for pre in prefixes]
         test_x = [np.load(os.path.join(PATH, '50_x.npy'))]
         test_y = [np.load(os.path.join(PATH, '50_y.npy'))]
 
         PATH = '/datasets/ai_challenge/interspeech20/'
-        x.append(np.load(os.path.join(PATH, 'shuffled_train_x.npy')))
-        y.append(np.load(os.path.join(PATH, 'shuffled_train_y.npy')))
         test_x.append(np.load(os.path.join(PATH, 'test_x.npy')))
         test_y.append(np.load(os.path.join(PATH, 'test_y.npy')))
         print('data loading finished')
 
-        max_len = max([_x.shape[2] for _x in x])
-        x = [np.pad(_x, ((0, 0), (0, 0), (0, max_len-_x.shape[2]), (0, 0)))
-             for _x in x]
         max_len = max([_x.shape[2] for _x in test_x])
         test_x = [np.pad(_x, ((0, 0), (0, 0), (0, max_len-_x.shape[2]), (0, 0)))
                   for _x in test_x]
         print('padding finished')
 
-        xs = np.concatenate(x, axis=0)
-        ys = np.concatenate(y, axis=0)
         test_x = np.concatenate(test_x, axis=0)
         test_y = np.concatenate(test_y, axis=0)
-        del x[:], y[:]
-        x, y = xs, ys
         print('data concatenating finished')
         
-        # pre-process
-        y = degree_to_class(y, one_hot=True).astype(np.float32)
-        test_y = degree_to_class(test_y, one_hot=True).astype(np.float32)
-
-        # 2. SPLITTING TRAIN AND VALIDATION SET
-        train_size = len(x)
-        val_size = int(train_size * VAL_SPLIT)
-        indices = np.random.permutation(train_size)
-
-        x, val_x = x[indices[:-val_size]], x[indices[-val_size:]]
-        y, val_y = y[indices[:-val_size]], y[indices[-val_size:]]
-        print('data spliting finished')
-
-        val_x = minmax_norm_magphase(val_x)
-        val_x = log_magphase(val_x)
         test_x = minmax_norm_magphase(test_x)
         test_x = log_magphase(test_x)
-
-        # FOR TESTING
-        max_len = max([_x.shape[2] for _x in [val_x, test_x]])
-        val_x = [np.pad(_x, ((0, 0), (0, 0), (0, max_len-_x.shape[2]), (0, 0)))
-                  for _x in [val_x, test_x]]
-        val_x = np.concatenate(val_x, axis=0)
-        val_y = np.concatenate([val_y, test_y], axis=0)
+        test_y = degree_to_class(test_y, one_hot=True).astype(np.float32)
+        print('preprocessing test dataset finished')
 
         """ TRAINING """
-        train_dataset = make_dataset(x, y, 
+        train_dataset = make_dataset(backgrounds, voices, labels,
                                      BATCH_SIZE,
                                      alpha=config.alpha)
 
@@ -175,9 +178,9 @@ if __name__ == "__main__":
             class_weight = None
 
         callbacks = [
-            # EarlyStopping(monitor='val_auc',
-            #               patience=50,
-            #               mode='max'),
+            EarlyStopping(monitor='val_auc',
+                          patience=50,
+                          mode='max'),
             CSVLogger(NAME.replace('.h5', '.log'),
                       append=True),
             ReduceLROnPlateau(monitor='auc',
@@ -198,8 +201,8 @@ if __name__ == "__main__":
         model.fit(train_dataset,
                   epochs=TOTAL_EPOCH,
                   batch_size=BATCH_SIZE,
-                  validation_data=(val_x, val_y),
-                  steps_per_epoch=x.shape[0]//BATCH_SIZE,
+                  validation_data=(test_x, test_y),
+                  steps_per_epoch=config.steps_per_epoch,
                   class_weight=class_weight,
                   callbacks=callbacks)
 
@@ -207,7 +210,7 @@ if __name__ == "__main__":
         with open(NAME.replace('.h5', '.log'), 'a') as f:
             f.write(f'\n{result}\n')
 
-    # For SWA
+    # SWA
     repeat = x.shape[0] // BATCH_SIZE
     for x, y in train_dataset:
         model(x, training=True)
@@ -215,5 +218,7 @@ if __name__ == "__main__":
         if repeat <= 0:
             break
 
-    model.evaluate(test_x, test_y, verbose=1)
+    result = model.evaluate(test_x, test_y, verbose=1)
+    with open(NAME.replace('.h5', '.log'), 'a') as f:
+        f.write(f'\n{result}\n')
     model.save(NAME.replace('.h5', "_SWA.h5"))

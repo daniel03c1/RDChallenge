@@ -97,6 +97,7 @@ if __name__ == "__main__":
                       loss='categorical_crossentropy',
                       metrics=['accuracy', 'AUC'])
         model.summary()
+
         
         if config.pretrain:
             model.load_weights(NAME)

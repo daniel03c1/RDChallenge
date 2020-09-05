@@ -1,10 +1,15 @@
+import torch
+import torchaudio
+import numpy as np
 import tensorflow as tf
+
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 EPSILON = 1e-8
 LOG_EPSILON = tf.math.log(EPSILON)
 
 
+""" FEATURE INDEPENDENT AUGMENTATIONS """
 def mask(specs, axis, max_mask_size=None, n_mask=1):
     def make_shape(size):
         # returns (1, ..., size, ..., 1)
@@ -33,22 +38,100 @@ def mask(specs, axis, max_mask_size=None, n_mask=1):
 def random_shift(specs, axis=0, width=16):
     new_specs = tf.pad(specs, [[0]*2 if i != axis else [width]*2
                                for i in range(len(specs.shape))])
-    '''
-    begin = [0] * len(specs.shape)
-    end = [s for s in specs.shape]
-    print(begin, end)
-
-    left = tf.random.uniform([], maxval=width*2, dtype=tf.int32)
-    begin[axis] = left
-    end[axis] += left - 1
-    print(begin, end, specs.shape)
-
-    new_specs = tf.slice(new_specs, begin, end)
-    '''
     new_specs = tf.image.random_crop(new_specs, specs.shape)
     return new_specs
 
 
+def cutmix(xs, ys):
+    '''
+    xs : [batch, height, width, chan] np.ndarray
+    ys : [batch, n_classes] np.ndarray
+    '''
+    xs = tf.cast(xs, tf.float32)
+    ys = tf.cast(ys, tf.float32)
+    batch, height, width, chan = xs.shape
+
+    # select lambda
+    sqrt_lmbda = tf.math.sqrt(tf.random.uniform([], maxval=1.))
+
+    # set size of window and recalculate lambda
+    size_h = tf.cast(height * sqrt_lmbda, dtype=tf.int32)
+    size_w = tf.cast(width * sqrt_lmbda, dtype=tf.int32)
+
+    # select window
+    offset_h = tf.random.uniform([], maxval=height-size_h, dtype=tf.int32)
+    offset_w = tf.random.uniform([], maxval=width-size_w, dtype=tf.int32)
+
+    windows = tf.ones([size_h, size_w], dtype=tf.float32)
+    windows = tf.pad(windows,
+                     [[offset_h, height-offset_h-size_h],
+                      [offset_w, width-offset_w-size_w]])
+    windows = tf.reshape(windows, (1, height, width, 1))
+
+    # shuffle
+    indices = tf.math.reduce_mean(tf.ones_like(ys), axis=-1)
+    indices = tf.cast(tf.math.cumsum(indices, exclusive=True), dtype='int32')
+    indices = tf.random.shuffle(indices)
+
+    # mix
+    xs = xs * (1-windows) + tf.gather(xs, indices, axis=0) * windows
+    mean = tf.cast((size_h * size_w) / (height * width), dtype=tf.float32)
+    ys = ys * (1-mean) + tf.gather(ys, indices, axis=0) * mean
+
+    return xs, ys
+
+
+def interclass(mix_func):
+    def _interclass(xs, ys):
+        '''
+        xs : [batch, height, width, chan] np.ndarray
+        ys : [batch, n_classes] np.ndarray
+        '''
+        xs_, ys_ = [], []
+        cls = tf.argmax(ys, axis=-1)
+
+        for i in range(ys.shape[-1]):
+            select = tf.squeeze(tf.where(cls == i), axis=-1)
+            xs_temp = tf.gather(xs, select, axis=0)
+            ys_temp = tf.gather(ys, select, axis=0)
+            xs_temp, ys_temp = mix_func(xs_temp, ys_temp)
+            xs_.append(xs_temp)
+            ys_.append(ys_temp)
+
+        return tf.concat(xs_, axis=0), tf.concat(ys_, axis=0)
+    return _inter
+
+
+def interbinary(mix_func):
+    ''' 
+    modified interclass mixup
+    returns mixup(audio with voice) + mixup(non-voice)
+    '''
+    def _interbinary(xs, ys):
+        '''
+        xs : [batch, height, width, chan] np.ndarray
+        ys : [batch, n_classes] np.ndarray
+        '''
+        xs_, ys_ = [], []
+        cls = tf.argmax(ys, axis=-1)
+
+        for i in range(2):
+            if i == 0:
+                select = tf.where(cls != ys.shape[-1]-1)
+            else:
+                select = tf.where(cls == ys.shape[-1]-1)
+            select = tf.squeeze(select, axis=-1)
+            xs_temp = tf.gather(xs, select, axis=0)
+            ys_temp = tf.gather(ys, select, axis=0)
+            xs_temp, ys_temp = mix_func(xs_temp, ys_temp)
+            xs_.append(xs_temp)
+            ys_.append(ys_temp)
+
+        return tf.concat(xs_, axis=0), tf.concat(ys_, axis=0)
+    return _interbinary
+
+
+""" MAGNITUDE-PHASE SPECTROGRAM """
 def random_magphase_flip(spec, label):
     flip = tf.cast(tf.random.uniform([]) > 0.5, spec.dtype)
     n_chan = spec.shape[-1] // 2
@@ -65,8 +148,13 @@ def random_magphase_flip(spec, label):
     return spec, label
 
 
-def magphase_mixup(alpha=2.):
-    beta = tf.compat.v1.distributions.Beta(alpha, alpha)
+def magphase_mixup(alpha=2., feat='magphase'):
+    '''
+    returns magphase
+    '''
+    assert feat in ['magphase', 'complex']
+    import tensorflow_probability as tfp
+    beta = tfp.distributions.Beta(alpha, alpha)
 
     def _mixup(specs, labels):
         # preprocessing
@@ -80,11 +168,10 @@ def magphase_mixup(alpha=2.):
         indices = tf.random.shuffle(indices)
 
         # assume mag, phase...
+        if feat == 'magphase':
+            specs = magphase_to_complex(specs)
         n_chan = specs.shape[-1] // 2
-        mag, phase = specs[..., :n_chan], specs[..., n_chan:]
-
-        real = mag * tf.cos(phase)
-        img = mag * tf.sin(phase)
+        real, img = specs[..., :n_chan], specs[..., n_chan:]
 
         l = beta.sample()
 
@@ -134,59 +221,122 @@ def minmax_norm_magphase(specs, labels=None):
     return specs
 
 
-def cutmix(xs, ys):
+def complex_to_magphase(complex_tensor):
+    n_chan = complex_tensor.shape[-1] // 2
+    real = complex_tensor[..., :n_chan]
+    img = complex_tensor[..., n_chan:]
+
+    mag = tf.math.sqrt(real**2 + img**2)
+    phase = tf.math.atan2(img, real)
+
+    return tf.concat([mag, phase], axis=-1)
+
+
+def magphase_to_complex(magphase):
+    n_chan = magphase.shape[-1] // 2
+    mag = magphase[..., :n_chan]
+    phase = magphase[..., n_chan:]
+
+    real = mag * tf.cos(phase)
+    img = mag * tf.sin(phase)
+
+    return tf.concat([real, img], axis=-1)
+
+
+def merge_complex_specs(background, 
+                        voice_and_label, 
+                        n_frame=300, 
+                        time_axis=1,
+                        prob=0.9,
+                        min_voice_ratio=2/3,
+                        speed_rate=0.,
+                        n_voice_classes=10):
     '''
-    xs : [batch, height, width, chan] np.ndarray
-    ys : [batch, n_classes] np.ndarray
+    INPUT
+    background: [freq, time, chan*2]
+    voice_and_label: tuple
+        ([freq, time, chan*2], int)
+    n_frame: number of output frames
+    time_axis: time axis, default=1
+    prob: probability of adding voice
+    min_voice_ratio: minimum ratio of voice overlap with background
+    speed_rate: speed up [1-speed_rate, 1+speed_rate]
+    n_voice_classes: 
+
+    OUTPUT
+    complex_spec: [freq, time, chan, 2]
+    output_label: one_hot [n_voice_classes + 1]
     '''
-    xs = tf.cast(xs, tf.float32)
-    ys = tf.cast(ys, tf.float32)
-    batch, height, width, chan = xs.shape
+    voice, label = voice_and_label
+    output_shape = tuple(
+        [s if i != time_axis else n_frame 
+         for i, s in enumerate(background.shape)])
+    n_dims = len(output_shape)
 
-    # select lambda
-    sqrt_lmbda = tf.math.sqrt(tf.random.uniform([], maxval=1.))
+    # speed
+    speeds = 2*np.random.rand(2)*speed_rate - speed_rate + 1
 
-    # set size of window and recalculate lambda
-    size_h = tf.cast(height * sqrt_lmbda, dtype=tf.int32)
-    size_w = tf.cast(width * sqrt_lmbda, dtype=tf.int32)
+    # background
+    # TODO: SPEED UP
+    # background = phase_vocoder(background, speeds[0])
+    bg_frame = tf.shape(background)[time_axis]
+    background = tf.tile(
+        background, 
+        [1 if i != time_axis else (n_frame+bg_frame-1) // bg_frame 
+         for i in range(n_dims)])
+    complex_spec = tf.image.random_crop(background, output_shape)
 
-    # select window
-    offset_h = tf.random.uniform([], maxval=height-size_h, dtype=tf.int32)
-    offset_w = tf.random.uniform([], maxval=width-size_w, dtype=tf.int32)
+    # voice:
+    v_bool = tf.random.uniform([]) < prob
+    if v_bool: # OVERLAP
+        # voice = phase_vocoder(voice, speeds[1])
+        v_ratio = tf.math.pow(10., -tf.random.uniform([], maxval=2)) # SNR 0 ~ -20
+        v_frame = tf.cast(tf.shape(voice)[time_axis], tf.float32)
+        if v_frame < n_frame:
+            voice = tf.pad(
+                voice,
+                [[0, 0] 
+                 if i != time_axis 
+                 else [n_frame - tf.cast(min_voice_ratio*v_frame, tf.int32)]*2
+                 for i in range(n_dims)])
+        voice = tf.image.random_crop(voice, output_shape)
+        complex_spec += v_ratio * voice
+    else:
+        label = n_voice_classes # non-voice audio
 
-    windows = tf.ones([size_h, size_w], dtype=tf.float32)
-    windows = tf.pad(windows,
-                     [[offset_h, height-offset_h-size_h],
-                      [offset_w, width-offset_w-size_w]])
-    windows = tf.reshape(windows, (1, height, width, 1))
+    output_label = tf.one_hot(label, n_voice_classes+1)
+    return complex_spec, output_label
+    
 
-    # shuffle
-    indices = tf.math.reduce_mean(tf.ones_like(ys), axis=-1)
-    indices = tf.cast(tf.math.cumsum(indices, exclusive=True), dtype='int32')
-    indices = tf.random.shuffle(indices)
-
-    # mix
-    xs = xs * (1-windows) + tf.gather(xs, indices, axis=0) * windows
-    mean = tf.cast((size_h * size_w) / (height * width), dtype=tf.float32)
-    ys = ys * (1-mean) + tf.gather(ys, indices, axis=0) * mean
-
-    return xs, ys
-
-
-def interclass_cutmix(xs, ys):
+def phase_vocoder(complex_spec, rate, freq_axis=0, hop_length=None):
     '''
-    xs : [batch, height, width, chan] np.ndarray
-    ys : [batch, n_classes] np.ndarray
+    https://pytorch.org/audio/_modules/torchaudio/functional.html#phase_vocoder
+
+    complex_spec: [freq, time, chan*2]
+    rate: float > 0
     '''
-    xs_, ys_ = [], []
-    cls = tf.argmax(ys, axis=-1)
+    if rate == 1:
+        return complex_spec
 
-    for i in range(ys.shape[-1]):
-        select = tf.squeeze(tf.where(cls == i), axis=-1)
-        xs_temp = tf.gather(xs, select, axis=0)
-        ys_temp = tf.gather(ys, select, axis=0)
-        xs_temp, ys_temp = cutmix(xs_temp, ys_temp)
-        xs_.append(xs_temp)
-        ys_.append(ys_temp)
+    shape = complex_spec.shape
+    n_freq = shape[freq_axis]
+    if hop_length is None:
+        hop_length = tf.cast(n_freq, 'float32') - 1.
+    phase_advance = tf.linspace(0., hop_length*np.pi, n_freq)[..., None]
+    phase_advance = torch.as_tensor(phase_advance) # .numpy())
 
-    return tf.concat(xs_, axis=0), tf.concat(ys_, axis=0)
+    # [freq, time, chan*2] to [chan, freq, time, 2]
+    pv = tf.reshape(complex_spec, (*shape[:-1], shape[-1]//2, 2))
+    pv = tf.transpose(pv, (2, 0, 1, 3))
+
+    # TODO: remove torchaudio and torch
+    pv = torchaudio.functional.phase_vocoder(torch.as_tensor(pv.numpy()),
+                                             rate,
+                                             phase_advance)
+
+    # [chan, freq, time, 2] to [freq, time, chan*2]
+    pv = tf.convert_to_tensor(pv.numpy())
+    pv = tf.reshape(tf.transpose(pv, (1, 2, 0, 3)),
+                    (shape[0], -1, shape[-1]))
+    return pv
+
