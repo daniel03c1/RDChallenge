@@ -78,7 +78,7 @@ def make_dataset(background, voice, label,
                                   n_frame=300,
                                   prob=0.9,
                                   min_voice_ratio=2/3,
-                                  speed_rate=0.))
+                                  speed_rate=0.2))
     dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
     dataset = dataset.batch(batch_size, drop_remainder=True)
 

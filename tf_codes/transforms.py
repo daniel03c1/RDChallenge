@@ -1,7 +1,8 @@
-import torch
-import torchaudio
+# import torch
+# import torchaudio
 import numpy as np
 import tensorflow as tf
+import tensorflow_io as tfio
 
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -275,10 +276,11 @@ def merge_complex_specs(background,
 
     # speed
     speeds = 2*np.random.rand(2)*speed_rate - speed_rate + 1
+    # speeds = [1., 1.]
 
     # background
     # TODO: SPEED UP
-    # background = phase_vocoder(background, speeds[0])
+    background = phase_vocoder(background, speeds[0])
     bg_frame = tf.shape(background)[time_axis]
     background = tf.tile(
         background, 
@@ -289,8 +291,8 @@ def merge_complex_specs(background,
     # voice:
     v_bool = tf.random.uniform([]) < prob
     if v_bool: # OVERLAP
-        # voice = phase_vocoder(voice, speeds[1])
-        v_ratio = tf.math.pow(10., -tf.random.uniform([], maxval=2)) # SNR 0 ~ -20
+        voice = phase_vocoder(voice, speeds[1])
+        v_ratio = tf.math.pow(10., -tf.random.uniform([], maxval=2)) # SNR0~-20
         v_frame = tf.cast(tf.shape(voice)[time_axis], tf.float32)
         if v_frame < n_frame:
             voice = tf.pad(
@@ -308,35 +310,76 @@ def merge_complex_specs(background,
     return complex_spec, output_label
     
 
-def phase_vocoder(complex_spec, rate, freq_axis=0, hop_length=None):
-    '''
+def phase_vocoder(complex_spec: tf.Tensor,
+                  rate: float=1.) -> tf.Tensor:
+    """
     https://pytorch.org/audio/_modules/torchaudio/functional.html#phase_vocoder
-
-    complex_spec: [freq, time, chan*2]
-    rate: float > 0
-    '''
+    complex_spec: [freq, time, chan*2] 
+                  [..., :chan] = real, [..., chan:] = imag
+    """
     if rate == 1:
         return complex_spec
 
-    shape = complex_spec.shape
-    n_freq = shape[freq_axis]
-    if hop_length is None:
-        hop_length = tf.cast(n_freq, 'float32') - 1.
-    phase_advance = tf.linspace(0., hop_length*np.pi, n_freq)[..., None]
-    phase_advance = torch.as_tensor(phase_advance) # .numpy())
+    shape = tf.shape(complex_spec)
+    freq = shape[0]
+    hop_length = freq - 1 # n_fft // 2
+    n_chan = shape[-1] // 2
 
-    # [freq, time, chan*2] to [chan, freq, time, 2]
-    pv = tf.reshape(complex_spec, (*shape[:-1], shape[-1]//2, 2))
-    pv = tf.transpose(pv, (2, 0, 1, 3))
+    def angle(spec):
+        return tf.math.atan2(spec[..., n_chan:], spec[..., :n_chan])
 
-    # TODO: remove torchaudio and torch
-    pv = torchaudio.functional.phase_vocoder(torch.as_tensor(pv.numpy()),
-                                             rate,
-                                             phase_advance)
+    phase_advance = tf.linspace(
+        0., np.pi * tf.cast(hop_length, 'float32'), freq)
+    phase_advance = tf.reshape(phase_advance, (-1, 1, 1))
+    time_steps = tf.range(0, shape[1], rate, dtype=complex_spec.dtype)
 
-    # [chan, freq, time, 2] to [freq, time, chan*2]
-    pv = tf.convert_to_tensor(pv.numpy())
-    pv = tf.reshape(tf.transpose(pv, (1, 2, 0, 3)),
-                    (shape[0], -1, shape[-1]))
-    return pv
+    spec = tf.pad(complex_spec,
+                  [[0, 0] if i != 1 else [0, 2] for i in range(len(shape))])
+
+    spec_0 = tf.gather(spec, tf.cast(time_steps, 'int32'), axis=1)
+    spec_1 = tf.gather(spec, tf.cast(time_steps+1, 'int32'), axis=1)
+
+    angle_0 = angle(spec_0)
+    angle_1 = angle(spec_1)
+
+    norm_0 = tf.norm(
+        tf.transpose(tf.reshape(spec_0, (freq, -1, 2, n_chan)), (0, 1, 3, 2)),
+        2, axis=-1)
+    norm_1 = tf.norm(
+        tf.transpose(tf.reshape(spec_1, (freq, -1, 2, n_chan)), (0, 1, 3, 2)),
+        2, axis=-1)
+
+    # Compute Phase Accum
+    phase_0 = angle(spec[..., :1, :]) # first frame angle
+    phase = angle_1 - angle_0 - phase_advance
+    phase = phase - 2 * np.pi * tf.math.round(phase / (2 * np.pi))
+    phase = phase + phase_advance
+    phase = tf.concat([phase_0, phase[:, :-1]], axis=1)
+    phase_acc = tf.cumsum(phase, 1)
+
+    alphas = tf.reshape(time_steps % 1., (1, -1, 1))
+    mag = alphas * norm_1 + (1 - alphas) * norm_0
+
+    real = mag * tf.cos(phase_acc)
+    imag = mag * tf.sin(phase_acc)
+
+    return tf.concat([real, imag], axis=-1) 
+
+
+def wav_to_complex(wav, win_len=512, hop=256):
+    '''
+    INPUT
+        wav: [chan, frames]
+    
+    OUTPUT
+        complex_spec: [freq, time, chan * 2]
+    '''
+    complex_spec = tf.signal.stft(wav, 
+                                  frame_length=win_len,
+                                  frame_step=hop,
+                                  pad_end=True)
+    complex_spec = tf.transpose(complex_spec, (2, 1, 0))
+    return tf.concat([tf.cast(tf.math.real(complex_spec), 'float32'),
+                      tf.cast(tf.math.imag(complex_spec), 'float32')],
+                     axis=-1)
 
