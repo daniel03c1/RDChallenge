@@ -237,38 +237,8 @@ class TransformsTest(tf.test.TestCase):
         self.assertAllClose(background, spec)
         self.assertAllClose([0, 0, 0, 0, 0, 1], l)
 
-        # TODO: speed ratio
-        pass
-
-    '''
-    def test_phase_vocoder(self):
-        n_freq, time, chan2 = 257, 100, 6
-
-        def torch_phase_vocoder(complex_spec, rate):
-            shape = complex_spec.shape
-            n_freq = complex_spec.shape[0]
-            hop_length = n_freq - 1
-            phase_advance = torch.linspace(0., hop_length*np.pi, n_freq)[..., None]
-            pv = tf.reshape(complex_spec, (*shape[:-1], shape[-1]//2, 2))
-            pv = tf.transpose(pv, (2, 0, 1, 3))
-            pv = torchaudio.functional.phase_vocoder(
-                torch.as_tensor(pv.numpy()), rate, phase_advance)
-
-            # [chan, freq, time, 2] to [freq, time, chan*2]
-            pv = tf.convert_to_tensor(pv.numpy())
-            pv = tf.reshape(tf.transpose(pv, (1, 2, 0, 3)),
-                            (shape[0], -1, shape[-1]))
-            return pv
-
-        spec = tf.random.normal([n_freq, time, chan2])
-        torch_spec = torch.as_tensor(spec.numpy())
-
-        self.assertAllClose(phase_vocoder(spec, 1.), spec)
-        self.assertAllClose(phase_vocoder(spec, 1.2),
-                            torch_phase_vocoder(spec, 1.2).numpy())
-        self.assertAllClose(phase_vocoder(spec, 0.8),
-                            torch_phase_vocoder(spec, 0.8).numpy())
-    '''
+    def test_speed_up(self):
+        self.assertEqual(True, False)
 
     def test_wav_to_complex(self):
         wav = np.random.randn(2, 5000)

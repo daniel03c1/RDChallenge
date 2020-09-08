@@ -60,31 +60,39 @@ def make_dataset(background, voice, label,
                  batch_size,
                  alpha=1,
                  **kwargs):
-    freq, _, chan = background[0].shape
+    chan, _ = background[0].shape
     b_dataset = tf.data.Dataset.from_generator(
         to_generator(background),
         tf.float32,
-        tf.TensorShape([freq, None, chan]))
+        tf.TensorShape([chan, None]))
     b_dataset = b_dataset.repeat().shuffle(len(background))
+    # b_dataset = b_dataset.map(speed_up(1., 0.1))
+    b_dataset = b_dataset.map(wav_to_complex) \
+                         .prefetch(AUTOTUNE)
 
     v_dataset = tf.data.Dataset.from_generator(
-        to_generator((voice, label)),
-        (tf.float32, tf.int32),
-        (tf.TensorShape([freq, None, chan]), tf.TensorShape([])))
-    v_dataset = v_dataset.repeat().shuffle(len(voice))
+        to_generator(voice),
+        tf.float32, 
+        tf.TensorShape([chan, None])).repeat()
+    # v_dataset = v_dataset.map(speed_up(1., 0.1))
+    v_dataset = v_dataset.map(wav_to_complex)
+    v_dataset = tf.data.Dataset.zip(
+        (v_dataset, tf.data.Dataset.from_tensor_slices(label).repeat()))
+    v_dataset = v_dataset.shuffle(len(voice)) \
+                         .prefetch(AUTOTUNE)
 
     dataset = tf.data.Dataset.zip((b_dataset, v_dataset))
     dataset = dataset.map(partial(merge_complex_specs,
                                   n_frame=300,
                                   prob=0.9,
-                                  min_voice_ratio=2/3,
-                                  speed_rate=0.2))
+                                  min_voice_ratio=2/3))
     dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
     dataset = dataset.batch(batch_size, drop_remainder=True)
 
     dataset = dataset.map(interbinary(magphase_mixup(alpha=alpha, feat='complex')))
     dataset = dataset.map(minmax_norm_magphase)
     dataset = dataset.map(log_magphase)
+    dataset = dataset.prefetch(AUTOTUNE)
     return dataset
 
 
@@ -135,9 +143,9 @@ if __name__ == "__main__":
         # TRAINING DATA
         PATH = '/codes/generate_wavs'
         backgrounds = pickle.load(
-            open(os.path.join(PATH, 'drone_complex_norm100_specs.pickle'), 'rb'))
+            open(os.path.join(PATH, 'drone_wavs_norm.pickle'), 'rb'))
         voices = pickle.load(
-            open(os.path.join(PATH, 'voice_complex_norm100_specs.pickle'), 'rb'))
+            open(os.path.join(PATH, 'voice_wavs_norm.pickle'), 'rb'))
         labels = np.load(os.path.join(PATH, 'voice_labels.npy'))
 
         # TESTING DATA
