@@ -1,8 +1,5 @@
-# import torch
-# import torchaudio
 import numpy as np
 import tensorflow as tf
-import tensorflow_io as tfio
 
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -250,8 +247,7 @@ def merge_complex_specs(background,
                         time_axis=1,
                         prob=0.9,
                         min_voice_ratio=2/3,
-                        n_fft=512,
-                        n_chan=2,
+                        speed_std=0.,
                         n_voice_classes=10):
     '''
     INPUT
@@ -261,18 +257,27 @@ def merge_complex_specs(background,
     time_axis: time axis, default=1
     prob: probability of adding voice
     min_voice_ratio: minimum ratio of voice overlap with background
-    n_fft=512,
+    speed_std: speed = normal(mean=1, std=speed_std)
     n_voice_classes: 
 
     OUTPUT
-    complex_spec: [freq, time, chan, 2]
+    complex_spec: [freq, time, chan*2]
     output_label: one_hot [n_voice_classes + 1]
     '''
     voice, label = voice_and_label
-    output_shape = tuple([n_fft//2+1, n_frame, n_chan*2])
+    output_shape = tuple(
+        [s if i != time_axis else n_frame
+         for i, s in enumerate(background.shape)])
     n_dims = len(output_shape)
 
+    # speed
+    if speed_std > 0:
+        speeds = tf.random.normal([2], mean=1., stddev=speed_std)
+    else:
+        speeds = [1., 1.]
+
     # background
+    background = phase_vocoder(background, speeds[0])
     bg_frame = tf.shape(background)[time_axis]
     background = tf.tile(
         background, 
@@ -283,6 +288,7 @@ def merge_complex_specs(background,
     # voice:
     v_bool = tf.random.uniform([]) < prob
     if v_bool: # OVERLAP
+        voice = phase_vocoder(voice, speeds[1])
         v_ratio = tf.math.pow(10., -tf.random.uniform([], maxval=2)) # SNR0~-20
         v_frame = tf.cast(tf.shape(voice)[time_axis], tf.float32)
         if v_frame < n_frame:
@@ -301,7 +307,67 @@ def merge_complex_specs(background,
     return complex_spec, output_label
 
 
+def phase_vocoder(complex_spec: tf.Tensor,
+                  rate: float=1.) -> tf.Tensor:
+    """
+    https://pytorch.org/audio/_modules/torchaudio/functional.html#phase_vocoder
+
+    complex_spec: [freq, time, chan*2] 
+                  [..., :chan] = real, [..., chan:] = imag
+    rate: float > 0.
+    """
+    if rate == 1:
+        return complex_spec
+
+    shape = tf.shape(complex_spec)
+    freq = shape[0]
+    hop_length = freq - 1 # n_fft // 2
+    n_chan = shape[-1] // 2
+
+    def angle(spec):
+        return tf.math.atan2(spec[..., n_chan:], spec[..., :n_chan])
+
+    phase_advance = tf.linspace(
+        0., np.pi * tf.cast(hop_length, 'float32'), freq)
+    phase_advance = tf.reshape(phase_advance, (-1, 1, 1))
+    time_steps = tf.range(0, shape[1], rate, dtype=complex_spec.dtype)
+
+    spec = tf.pad(complex_spec,
+                  [[0, 0] if i != 1 else [0, 2] for i in range(len(shape))])
+
+    spec_0 = tf.gather(spec, tf.cast(time_steps, 'int32'), axis=1)
+    spec_1 = tf.gather(spec, tf.cast(time_steps+1, 'int32'), axis=1)
+
+    angle_0 = angle(spec_0)
+    angle_1 = angle(spec_1)
+
+    norm_0 = tf.norm(
+        tf.transpose(tf.reshape(spec_0, (freq, -1, 2, n_chan)), (0, 1, 3, 2)),
+        2, axis=-1)
+    norm_1 = tf.norm(
+        tf.transpose(tf.reshape(spec_1, (freq, -1, 2, n_chan)), (0, 1, 3, 2)),
+        2, axis=-1)
+
+    # Compute Phase Accum
+    phase_0 = angle(spec[..., :1, :]) # first frame angle
+    phase = angle_1 - angle_0 - phase_advance
+    phase = phase - 2 * np.pi * tf.math.round(phase / (2 * np.pi))
+    phase = phase + phase_advance
+    phase = tf.concat([phase_0, phase[:, :-1]], axis=1)
+    phase_acc = tf.cumsum(phase, 1)
+
+    alphas = tf.reshape(time_steps % 1., (1, -1, 1))
+    mag = alphas * norm_1 + (1 - alphas) * norm_0
+
+    real = mag * tf.cos(phase_acc)
+    imag = mag * tf.sin(phase_acc)
+
+    return tf.concat([real, imag], axis=-1)
+
+
 def speed_up(mean=1., stddev=0.):
+    import tensorflow_io as tfio
+
     def _speed_up(wav):
         chan = wav.shape[0]
         speed = tf.random.normal([], mean=mean, stddev=stddev)

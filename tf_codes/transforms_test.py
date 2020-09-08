@@ -237,6 +237,18 @@ class TransformsTest(tf.test.TestCase):
         self.assertAllClose(background, spec)
         self.assertAllClose([0, 0, 0, 0, 0, 1], l)
 
+    def test_phase_vocoder(self):
+        n_freq, time, chan2 = 257, 100, 6
+        complex_spec = tf.random.normal([n_freq, time, chan2])
+
+        self.assertAllEqual(complex_spec,
+                            phase_vocoder(complex_spec, 1.))
+        
+        for rate in [1.2, 0.8]:
+            pv = phase_vocoder(complex_spec, rate=rate)
+            self.assertAllEqual([n_freq, int(np.ceil(time/rate)), chan2],
+                                pv.shape)
+
     def test_speed_up(self):
         self.assertEqual(True, False)
 
