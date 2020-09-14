@@ -16,7 +16,7 @@ from utils import *
 
 
 args = argparse.ArgumentParser()
-args.add_argument('--name', type=str, default='infinite_B0')
+args.add_argument('--name', type=str, required=True)
 args.add_argument('--model', type=str, default='EfficientNetB0')
 args.add_argument('--optimizer', type=str, default='adam',
                                  choices=['adam', 'sgd', 'rmsprop'])
@@ -30,10 +30,11 @@ args.add_argument('--cls_weights', type=bool, default=False)
 args.add_argument('--epochs', type=int, default=200)
 args.add_argument('--batch_size', type=int, default=32)
 args.add_argument('--n_chan', type=int, default=2)
-args.add_argument('--steps_per_epoch', type=int, default=100)
+args.add_argument('--steps_per_epoch', type=int, default=500)
 
 # AUGMENTATION
 args.add_argument('--alpha', type=float, default=0.75)
+args.add_argument('--speed_std', type=float, default=0.1)
 args.add_argument('--l2', type=float, default=0)
 
 
@@ -57,35 +58,50 @@ def to_generator(dataset):
 
 
 def make_dataset(background, voice, label,
-                 batch_size,
+                 noises=None,
+                 batch_size=64,
                  alpha=1,
+                 speed_std=0.1,
                  **kwargs):
+    # BACKGROUND NOISE (DRONE)
     freq, _, chan = background[0].shape
     b_dataset = tf.data.Dataset.from_generator(
         to_generator(background),
         tf.float32,
         tf.TensorShape([freq, None, chan]))
     b_dataset = b_dataset.repeat().shuffle(len(background))
+    b_dataset = b_dataset.map(speed_up(speed_std))
 
+    # HUMAN VOICE
     v_dataset = tf.data.Dataset.from_generator(
         to_generator((voice, label)),
         (tf.float32, tf.int32),
         (tf.TensorShape([freq, None, chan]), tf.TensorShape([])))
     v_dataset = v_dataset.repeat().shuffle(len(voice))
+    v_dataset = v_dataset.map(speed_up(speed_std))
 
-    dataset = tf.data.Dataset.zip((b_dataset, v_dataset))
+    # NOISES
+    if noises is not None:
+        n_dataset = tf.data.Dataset.from_generator(
+            to_generator(noises),
+            tf.float32,
+            tf.TensorShape([freq, None, chan]))
+        n_dataset = n_dataset.repeat().shuffle(len(noises))
+        dataset = tf.data.Dataset.zip((b_dataset, v_dataset, n_dataset))
+    else:
+        dataset = tf.data.Dataset.zip((b_dataset, v_dataset))
+
     dataset = dataset.map(partial(merge_complex_specs,
                                   n_frame=300,
                                   prob=0.9,
-                                  min_voice_ratio=2/3,
-                                  speed_std=0.1))
+                                  min_voice_ratio=2/3))
     dataset = dataset.map(augment, num_parallel_calls=AUTOTUNE)
     dataset = dataset.batch(batch_size, drop_remainder=True)
 
     dataset = dataset.map(interbinary(magphase_mixup(alpha=alpha, feat='complex')))
     dataset = dataset.map(minmax_norm_magphase)
     dataset = dataset.map(log_magphase)
-    return dataset
+    return dataset.prefetch(AUTOTUNE)
 
 
 if __name__ == "__main__":
@@ -112,6 +128,10 @@ if __name__ == "__main__":
             utils=tf.keras.utils,
         )
 
+        # TEST: cosine-decay scheduler 
+        config.lr = tf.keras.experimental.CosineDecay(
+            config.lr, config.epochs*config.steps_per_epoch,
+            alpha=config.lr * 1e-2)
         if config.optimizer == 'adam':
             opt = Adam(config.lr) 
         elif config.optimizer == 'sgd':
@@ -135,10 +155,16 @@ if __name__ == "__main__":
         # TRAINING DATA
         PATH = '/codes/generate_wavs'
         backgrounds = pickle.load(
-            open(os.path.join(PATH, 'drone_complex_norm100_specs.pickle'), 'rb'))
+            open(os.path.join(PATH, 'drone_normed_complex.pickle'), 'rb'))
         voices = pickle.load(
-            open(os.path.join(PATH, 'voice_complex_norm100_specs.pickle'), 'rb'))
+            open(os.path.join(PATH, 'voice_normed_complex.pickle'), 'rb'))
         labels = np.load(os.path.join(PATH, 'voice_labels.npy'))
+
+        # ADDITIONAL NOISES
+        PATH = 'sounds/'
+        noises = pickle.load(open(os.path.join(PATH, 'noises_specs.pickle'), 'rb'))
+        noises += pickle.load(
+            open(os.path.join(PATH, 'bck_noises_specs.pickle'), 'rb'))
 
         # TESTING DATA
         PATH = '/datasets/ai_challenge/icassp'
@@ -166,8 +192,9 @@ if __name__ == "__main__":
 
         """ TRAINING """
         train_dataset = make_dataset(backgrounds, voices, labels,
-                                     BATCH_SIZE,
-                                     alpha=config.alpha)
+                                     batch_size=BATCH_SIZE,
+                                     alpha=config.alpha,
+                                     speed_std=config.speed_std)
 
         if config.cls_weights:
             class_weight = {
@@ -178,15 +205,15 @@ if __name__ == "__main__":
             class_weight = None
 
         callbacks = [
-            EarlyStopping(monitor='val_auc',
-                          patience=50,
-                          mode='max'),
+            # EarlyStopping(monitor='val_auc',
+            #               patience=50,
+            #               mode='max'),
             CSVLogger(NAME.replace('.h5', '.log'),
                       append=True),
-            ReduceLROnPlateau(monitor='auc',
-                              factor=config.lr_factor,
-                              patience=config.lr_patience,
-                              mode='max'),
+            # ReduceLROnPlateau(monitor='auc',
+            #                   factor=config.lr_factor,
+            #                   patience=config.lr_patience,
+            #                   mode='max'),
             SWA(start_epoch=TOTAL_EPOCH//2, swa_freq=2),
             ModelCheckpoint(NAME,
                             monitor='val_auc',
@@ -211,12 +238,9 @@ if __name__ == "__main__":
             f.write(f'\n{result}\n')
 
     # SWA
-    repeat = x.shape[0] // BATCH_SIZE
-    for x, y in train_dataset:
-        model(x, training=True)
-        repeat -= 1
-        if repeat <= 0:
-            break
+    model.compile(tf.keras.optimizers.SGD(0.),
+                  'sparse_categorical_crossentropy')
+    model.fit(test_x, test_y, batch_size=BATCH_SIZE)
 
     result = model.evaluate(test_x, test_y, verbose=1)
     with open(NAME.replace('.h5', '.log'), 'a') as f:

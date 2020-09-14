@@ -243,21 +243,25 @@ def magphase_to_complex(magphase):
 
 def merge_complex_specs(background, 
                         voice_and_label, 
+                        noise=None,
                         n_frame=300, 
                         time_axis=1,
                         prob=0.9,
+                        noise_prob=0.3,
                         min_voice_ratio=2/3,
-                        speed_std=0.,
+                        min_noise_ratio=1/2,
                         n_voice_classes=10):
     '''
     INPUT
-    background: [chan, time] 
-    voice_and_label: tuple ([chan, time], int)
+    background: [freq, time, chan2] 
+    voice_and_label: tuple ([freq, time, chan2], int)
+    noise: None or [freq, time, chan2]
     n_frame: number of output frames
     time_axis: time axis, default=1
     prob: probability of adding voice
+    noise_prob: prob of adding noise
     min_voice_ratio: minimum ratio of voice overlap with background
-    speed_std: speed = normal(mean=1, std=speed_std)
+    min_noise_ratio: minimum ratio of noise overlap with background
     n_voice_classes: 
 
     OUTPUT
@@ -270,14 +274,7 @@ def merge_complex_specs(background,
          for i, s in enumerate(background.shape)])
     n_dims = len(output_shape)
 
-    # speed
-    if speed_std > 0:
-        speeds = tf.random.normal([2], mean=1., stddev=speed_std)
-    else:
-        speeds = [1., 1.]
-
     # background
-    background = phase_vocoder(background, speeds[0])
     bg_frame = tf.shape(background)[time_axis]
     background = tf.tile(
         background, 
@@ -285,10 +282,9 @@ def merge_complex_specs(background,
          for i in range(n_dims)])
     complex_spec = tf.image.random_crop(background, output_shape)
 
-    # voice:
+    # voice
     v_bool = tf.random.uniform([]) < prob
     if v_bool: # OVERLAP
-        voice = phase_vocoder(voice, speeds[1])
         v_ratio = tf.math.pow(10., -tf.random.uniform([], maxval=2)) # SNR0~-20
         v_frame = tf.cast(tf.shape(voice)[time_axis], tf.float32)
         if v_frame < n_frame:
@@ -302,6 +298,21 @@ def merge_complex_specs(background,
         complex_spec += v_ratio * voice
     else:
         label = n_voice_classes # non-voice audio
+    
+    # noise
+    if noise is not None:
+        if tf.random.uniform([]) < noise_prob:
+            v_ratio = tf.math.pow(10., -tf.random.uniform([], maxval=2)) # SNR0~-20
+            v_frame = tf.cast(tf.shape(voice)[time_axis], tf.float32)
+            if v_frame < n_frame:
+                voice = tf.pad(
+                    voice,
+                    [[0, 0] 
+                     if i != time_axis 
+                     else [n_frame - tf.cast(min_noise_ratio*v_frame, tf.int32)]*2
+                     for i in range(n_dims)])
+            voice = tf.image.random_crop(voice, output_shape)
+            complex_spec += v_ratio * voice
 
     output_label = tf.one_hot(label, n_voice_classes+1)
     return complex_spec, output_label
@@ -319,10 +330,10 @@ def phase_vocoder(complex_spec: tf.Tensor,
     if rate == 1:
         return complex_spec
 
-    shape = tf.shape(complex_spec)
-    freq = shape[0]
+    # shape = tf.shape(complex_spec)
+    freq = complex_spec.shape[0]
     hop_length = freq - 1 # n_fft // 2
-    n_chan = shape[-1] // 2
+    n_chan = complex_spec.shape[-1] // 2
 
     def angle(spec):
         return tf.math.atan2(spec[..., n_chan:], spec[..., :n_chan])
@@ -330,10 +341,10 @@ def phase_vocoder(complex_spec: tf.Tensor,
     phase_advance = tf.linspace(
         0., np.pi * tf.cast(hop_length, 'float32'), freq)
     phase_advance = tf.reshape(phase_advance, (-1, 1, 1))
-    time_steps = tf.range(0, shape[1], rate, dtype=complex_spec.dtype)
+    time_steps = tf.range(0, tf.shape(complex_spec)[1], rate, dtype=complex_spec.dtype)
 
     spec = tf.pad(complex_spec,
-                  [[0, 0] if i != 1 else [0, 2] for i in range(len(shape))])
+                  [[0, 0] if i != 1 else [0, 2] for i in range(len(complex_spec.shape))])
 
     spec_0 = tf.gather(spec, tf.cast(time_steps, 'int32'), axis=1)
     spec_1 = tf.gather(spec, tf.cast(time_steps+1, 'int32'), axis=1)
@@ -362,22 +373,18 @@ def phase_vocoder(complex_spec: tf.Tensor,
     real = mag * tf.cos(phase_acc)
     imag = mag * tf.sin(phase_acc)
 
-    return tf.concat([real, imag], axis=-1)
+    spec = tf.concat([real, imag], axis=-1)
+    return spec
 
 
-def speed_up(mean=1., stddev=0.):
-    import tensorflow_io as tfio
+def speed_up(std=0.):
+    def _speed_up(spec, label=None):
+        if std > 0:
+            spec = phase_vocoder(spec, tf.random.normal([], mean=1., stddev=std))
 
-    def _speed_up(wav):
-        chan = wav.shape[0]
-        speed = tf.random.normal([], mean=mean, stddev=stddev)
-        wav = tf.transpose(wav, (1, 0))
-        wav = tfio.audio.resample(wav,
-                                  16000,
-                                  tf.cast(16000/speed, 'int64'))
-        wav = tf.transpose(wav, (1, 0))
-        wav = tf.reshape(wav, (chan, -1))
-        return wav
+        if label is None:
+            return spec
+        return spec, label
     return _speed_up
 
 

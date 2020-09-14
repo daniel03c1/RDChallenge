@@ -58,6 +58,18 @@ def make_dataset(specs, labels,
     return dataset
 
 
+def cosine_decay_with_warmup(warm_steps, lr, total_steps):
+    cosine_decay = tf.keras.experimental.CosineDecay(
+        lr, total_steps - warm_steps, alpha=lr*1e-4)
+
+    def scheduler(step):
+        if step < warm_steps:
+            return lr * (step / warm_steps)
+        return cosine_decay(step - warm_steps)
+
+    return scheduler
+
+
 if __name__ == "__main__":
     config = args.parse_args()
     print(config)
@@ -83,6 +95,9 @@ if __name__ == "__main__":
             utils=tf.keras.utils,
         )
 
+        config.lr = cosine_decay_with_warmup(config.steps_per_epoch * 5,
+                                             config.lr,
+                                             config.steps_per_epoch * config.steps)
         if config.optimizer == 'adam':
             opt = Adam(config.lr) 
         elif config.optimizer == 'sgd':
@@ -180,10 +195,10 @@ if __name__ == "__main__":
             #               mode='max'),
             CSVLogger(NAME.replace('.h5', '.log'),
                       append=True),
-            ReduceLROnPlateau(monitor='auc',
-                              factor=config.lr_factor,
-                              patience=config.lr_patience,
-                              mode='max'),
+            # ReduceLROnPlateau(monitor='auc',
+            #                   factor=config.lr_factor,
+            #                   patience=config.lr_patience,
+            #                   mode='max'),
             SWA(start_epoch=TOTAL_EPOCH//2, swa_freq=2),
             ModelCheckpoint(NAME,
                             monitor='val_auc',
